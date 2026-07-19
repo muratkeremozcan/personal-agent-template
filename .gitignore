@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+
+# Secrets and credentials
+.env
+.env.*
+credentials/
+secrets/
+*.pem
+*.key
+
+# Raw imports require review before versioning
+imports/raw/
+
+# The sanctum at _bmad/memory/local-agent/ is intentionally tracked. It is the
+# owner's versioned identity and memory. Never add a blanket _bmad/memory/ ignore
+# rule without deciding how that continuity will be backed up.
+
+# Optional private knowledge stays on the current device unless moved manually.
+# This is an owner-maintained convention. It is not a security boundary.
+_bmad/memory/local-agent/knowledge/private/
