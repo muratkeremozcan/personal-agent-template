@@ -14,6 +14,31 @@ The repository is named `personal-agent-template`. The skill and sanctum use
 title, voice, mission, owner context, capabilities, and specialist integrations
 are all customizable.
 
+## Quick Start
+
+1. Clone this template into its canonical home:
+
+   ```bash
+   git clone <template-repository-url> ~/local-agent
+   cd ~/local-agent
+   ```
+
+2. Install BMad Builder:
+
+   ```bash
+   npx bmad-method install
+   ```
+
+3. Use BMad Builder to customize this agent: give it the owner's name, voice,
+   mission, and context, and point it at an existing assistant or memory export
+   if one should carry forward. BMad Builder writes the owner-specific layer.
+   The lifecycle mechanism in `skills/local-agent/scripts/` is already built and
+   tested, so it is never regenerated.
+
+That is the whole shape. The Full Guide below walks through the same three
+steps in depth, plus verification, migrating an existing assistant, and moving
+to another device.
+
 ## Quick Answers
 
 ### Why use local files instead of hosted assistant memory?
@@ -115,6 +140,12 @@ export LOCAL_AGENT_HOME=/absolute/path/to/local-agent
 
 The `project-root` argument still describes the project being worked on. It
 provides situational context and never relocates the sanctum.
+
+## Full Guide
+
+The Quick Start above covers the common path end to end. The steps below cover
+the same ground in full depth: verification, importing an existing assistant's
+memory, moving to another device, and updating BMad safely.
 
 ## 1. Prerequisites
 

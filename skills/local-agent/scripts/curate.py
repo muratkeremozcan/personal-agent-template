@@ -34,6 +34,7 @@ Exit codes: 0 success, 1 no sanctum found, 2 usage error.
 """
 
 import argparse
+import importlib
 import json
 import os
 import re
@@ -74,8 +75,7 @@ DATE_IN_NAME = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 def count_tokens(text: str) -> tuple[int, str]:
     """Return (token_count, method), falling back to chars//4 without tiktoken."""
     try:
-        import tiktoken
-
+        tiktoken = importlib.import_module("tiktoken")
         enc = tiktoken.get_encoding("cl100k_base")
         return len(enc.encode(text)), "tiktoken"
     except Exception:
