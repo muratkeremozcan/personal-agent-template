@@ -16,24 +16,34 @@ are all customizable.
 
 ## Quick Start
 
-1. Clone this template into its canonical home:
+1. Get the template into its canonical home, then enter the folder. Clone it, or
+   unzip a downloaded copy:
 
    ```bash
    git clone <template-repository-url> ~/local-agent
    cd ~/local-agent
    ```
 
-2. Install BMad Builder:
+2. Install BMad and BMad Builder:
 
    ```bash
-   npx bmad-method install
+   npx bmad-method@latest install
    ```
 
-3. Use BMad Builder to customize this agent: give it the owner's name, voice,
-   mission, and context, and point it at an existing assistant or memory export
-   if one should carry forward. BMad Builder writes the owner-specific layer.
-   The lifecycle mechanism in `skills/local-agent/scripts/` is already built and
-   tested, so it is never regenerated.
+   In the installer, select **BMad Builder (BMB)**. Optionally add specialist
+   modules the owner uses, such as **Test Architect**.
+
+3. Launch any skill-capable LLM tool in the folder. On first use, invoke:
+
+   ```text
+   bmad-bmb-setup
+   ```
+
+   Then invoke `bmad-agent-builder` to customize the agent: give it the owner's
+   name, voice, mission, and context, and point it at an existing assistant or
+   memory export if one should carry forward. BMad Builder writes the
+   owner-specific layer. The lifecycle mechanism in `skills/local-agent/scripts/`
+   is already built and tested, so it is never regenerated.
 
 That is the whole shape. The Full Guide below walks through the same three
 steps in depth, plus verification, migrating an existing assistant, and moving
@@ -116,36 +126,67 @@ is appropriate only for a narrow requirement that the sanctum cannot express.
 
 ## Lifecycle
 
-`wake.py` resolves one canonical home. It ignores the invocation directory when
-locating identity and memory.
+Three scripts run the mechanism. Each has a single job, and their
+responsibilities never overlap:
+
+| Script            | Role    | When it runs                    | Writes?             |
+| ----------------- | ------- | ------------------------------- | ------------------- |
+| `init-sanctum.py` | Builder | Once, during First Breath       | Scaffolds the sanctum |
+| `wake.py`         | Router  | Every activation                | Read-only           |
+| `curate.py`       | Auditor | Periodically, on a curation pass | Read-only           |
+
+**`init-sanctum.py` builds the sanctum.** It creates the folder structure,
+copies the templates with config values substituted, copies references and
+supporting scripts in, and auto-generates `CAPABILITIES.md` from capability
+frontmatter. It is idempotent: if a sanctum already exists, it exits without
+touching it. This one run is the only time a script writes the sanctum;
+everything after is the agent editing its own memory.
+
+**`wake.py` routes every activation.** It inspects the canonical home and picks
+one mode from filesystem state alone:
 
 ```text
 Activation
-└── wake.py
-    ├── no scaffold
-    │   └── FIRST_BREATH
-    ├── scaffold exists, .born absent
-    │   └── FIRST_BREATH_RESUME
-    └── scaffold exists, .born present
-        └── WAKING
-            └── load INDEX, PERSONA, CREED, BOND, MEMORY, CAPABILITIES
+└── wake.py  (canonical home, read-only)
+    ├── no scaffold ................ FIRST_BREATH        → load references/first-breath.md
+    ├── scaffold, no .born ......... FIRST_BREATH_RESUME → resume the interrupted birth
+    └── scaffold + .born ........... WAKING              → print INDEX, PERSONA, CREED,
+                                                           BOND, MEMORY, CAPABILITIES
 ```
 
-The canonical home defaults to `~/local-agent`. Set `LOCAL_AGENT_HOME` to an
-absolute path when the repository lives elsewhere:
+`.born` is the handshake between the builder and the router. `init-sanctum.py`
+lays down placeholder files but never writes `.born`; the conversational First
+Breath writes it last, once the identity is real. A scaffold without `.born`
+therefore means a birth was interrupted, so `wake.py` resumes it rather than
+greeting over placeholders.
+
+**`curate.py` audits the sanctum.** It reads the same canonical home and reports
+the exact numbers the agent cannot eyeball: `MEMORY.md` token count against its
+guardrail, session logs aged past the retention threshold, and files on disk
+that have drifted out of `INDEX.md`. It never edits anything; the pruning
+judgment stays with the agent, which acts on the report.
+
+### The canonical home ties them together
+
+`wake.py` and `curate.py` resolve one fixed sanctum home and ignore the
+invocation directory, so an unrelated project can never trigger a false First
+Breath or spawn a second identity. The home defaults to `~/local-agent`; set
+`LOCAL_AGENT_HOME` when the repository lives elsewhere:
 
 ```bash
 export LOCAL_AGENT_HOME=/absolute/path/to/local-agent
 ```
 
-The `project-root` argument still describes the project being worked on. It
-provides situational context and never relocates the sanctum.
+The `project-root` argument is situational context for the agent and never
+relocates the sanctum for those two scripts. It matters mechanically in exactly
+one place: `init-sanctum.py` scaffolds under `<project-root>/_bmad`, so First
+Breath must run with the canonical home as its project root. That is how the
+scaffold lands where `wake.py` and `curate.py` will later look for it.
 
 ## Full Guide
 
-The Quick Start above covers the common path end to end. The steps below cover
-the same ground in full depth: verification, importing an existing assistant's
-memory, moving to another device, and updating BMad safely.
+The steps below cover the same ground in full depth: verification, importing an
+existing assistant's memory, moving to another device, and updating BMad safely.
 
 ## 1. Prerequisites
 
@@ -185,7 +226,7 @@ tracked so Git can provide history and rollback. The optional
 From `~/local-agent`:
 
 ```bash
-npx bmad-method install
+npx bmad-method@latest install
 ```
 
 In the interactive installer:
