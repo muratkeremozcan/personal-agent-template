@@ -171,7 +171,7 @@ No background process runs the scripts or watches the filesystem. The generated
 `uv`. `SKILL.md` is the entry point that this template deliberately omits.
 
 **How `SKILL.md` gets created.** `bmad-agent-builder` writes it (Quick Start
-Step 3, Full Guide Step 5). Agent Builder wires an "On Activation" step into the
+Step 3, Full Guide Step 6). Agent Builder wires an "On Activation" step into the
 generated `SKILL.md` that runs `uv run scripts/wake.py {project-root}` as the
 agent's first act. Until Agent Builder runs, there is no `SKILL.md`, so the
 template has no entry point and cannot self-activate. The scripts sit inert with
@@ -268,19 +268,20 @@ The [Full Guide](docs/full-guide.md) covers the deep operational path:
 
 1. Prerequisites
 2. Create the owner's repository
-3. Install BMad Method and BMad Builder
+3. Install BMad Builder
 4. Choose a customization path (start fresh, extend an existing assistant, or
    plan a migration with Module Builder)
-5. Customize with Agent Builder
-6. Package the customization with Module Builder
-7. Run the lifecycle tests
-8. Run First Breath
-9. Import approved prior memory
-10. Add an optional specialist
-11. Verify end-to-end behavior
-12. Daily memory discipline
-13. Move to another device
-14. Update BMad safely
+5. Prepare an optional specialist dispatch
+6. Customize with Agent Builder
+7. Optionally package with Module Builder
+8. Run the lifecycle tests
+9. Install the generated skill
+10. Run First Breath
+11. Import approved prior memory
+12. Verify end-to-end behavior
+13. Daily memory discipline
+14. Move to another device
+15. Update BMad safely
 
 It also carries the [Definition of Done](docs/full-guide.md#definition-of-done)
 and [official BMad references](docs/full-guide.md#official-references).

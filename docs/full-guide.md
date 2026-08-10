@@ -1,9 +1,8 @@
 # Full Guide
 
 The [README](../README.md) covers the common path end to end: Quick Start, what
-ships, what triggers the scripts, and the lifecycle. This guide covers the same
-ground in full depth: verification, importing an existing assistant's memory,
-moving to another device, and updating BMad safely.
+ships, what triggers the scripts, and the lifecycle. This guide adds migration,
+packaging, installation, verification, daily operation, and safe updates.
 
 ## 1. Prerequisites
 
@@ -20,6 +19,7 @@ Verify the local tools:
 node --version
 git --version
 uv --version
+npx bmad-method install --list-tools
 ```
 
 ## 2. Create the Owner's Repository
@@ -36,9 +36,10 @@ Local Git without a remote is also valid.
 
 Review `.gitignore` before importing anything. The main sanctum is intentionally
 tracked so Git can provide history and rollback. The optional
-`knowledge/private/` path is ignored as an owner-maintained convention.
+`_bmad/memory/local-agent/knowledge/private/` path is ignored as an
+owner-maintained convention.
 
-## 3. Install BMad Method and BMad Builder
+## 3. Install BMad Builder
 
 From `~/local-agent`:
 
@@ -48,7 +49,7 @@ npx bmad-method@latest install
 
 In the interactive installer:
 
-1. Select BMad Method and BMad Builder.
+1. Select BMad Builder (BMB).
 2. Select only the AI tools the owner uses.
 3. Keep the installation project-scoped inside `~/local-agent`.
 4. Add an optional specialist module only when its domain and data policy fit
@@ -117,11 +118,29 @@ owner-specific seed. It must also give Create Module enough context to package
 and validate the finished standalone skill.
 ```
 
-Pass the resulting plan to Agent Builder in step 5 and back to Module Builder in
-step 6. The plan classifies proposed customization. It does not authorize writes
+Pass the resulting plan to Agent Builder in step 6 and back to Module Builder in
+step 7. The plan classifies proposed customization. It does not authorize writes
 to the sanctum.
 
-## 5. Customize with Agent Builder
+## 5. Prepare an Optional Specialist Dispatch
+
+Skip this step when the agent has no specialist integration.
+
+`skills/local-agent/examples/external-skill-dispatch.md` is a generic starting
+point. Replace every placeholder, verify the specialist is installed, and copy
+the customized dispatch into `skills/local-agent/references/`.
+
+Agent Builder will read the dispatch in step 6 and update `SKILL.md` and the
+capability description. `init-sanctum.py` discovers external-capability
+frontmatter and records the installed skill by reference. The specialist keeps
+ownership of its domain implementation.
+
+For an existing agent whose First Breath is complete, add the dispatch as a
+learned capability inside the sanctum and register it in `CAPABILITIES.md` and
+`INDEX.md`. The initializer is idempotent and will not overwrite an existing
+sanctum.
+
+## 6. Customize with Agent Builder
 
 Invoke `bmad-agent-builder` and choose Build Process. Include the optional
 Module Builder plan when one exists. Give it the following prompt after
@@ -189,12 +208,15 @@ lifecycle script and test, resolved intended identity placeholders, and left
 unapproved memories untouched.
 
 Run Agent Builder Quality Optimize. Resolve every valid finding, then run the
-tests in step 7.
+tests in step 8.
 
-## 6. Package the Customization with Module Builder
+## 7. Package with Module Builder (Optional)
 
-Agent Builder owns agent behavior. Module Builder owns installable packaging,
-registration, configuration variables, help entries, and structural validation.
+Skip this step for a personal agent that will be installed directly from
+`skills/local-agent`. Agent Builder owns agent behavior. Module Builder adds
+installable packaging, registration, configuration variables, help entries, and
+structural validation when the agent will be shared or needs richer BMad
+discoverability.
 
 Invoke `bmad-module-builder`, select Create Module, and provide this prompt:
 
@@ -238,7 +260,7 @@ Version: 0.1.0
 Module Builder may add registration assets and merge scripts. Review those files
 before committing. It must not add sanctum data or raw imports to the module.
 
-## 7. Run the Lifecycle Tests
+## 8. Run the Lifecycle Tests
 
 From the repository root:
 
@@ -258,11 +280,30 @@ The suite verifies:
 - generic Remember and Recall discovery
 - external capability source formatting
 
-## 8. Run First Breath
+## 9. Install the Generated Skill
 
-Activate the generated agent with `~/local-agent` as its canonical home. The
-generated SKILL.md should run the initializer and route into
-`references/first-breath.md`.
+After Agent Builder creates `SKILL.md` and the lifecycle tests pass, rerun the
+BMad installer:
+
+```bash
+npx bmad-method@latest install
+```
+
+Choose **Modify Install**, preserve the existing module and AI-tool selections,
+then add `~/local-agent/skills` when prompted for a custom source. The installer
+discovers `local-agent` directly from its `SKILL.md` and exposes it to the
+selected tools. This works whether step 7 packaged the skill or was skipped.
+
+Confirm that each selected tool can discover `local-agent` before continuing.
+The [custom-module installation guide](https://docs.bmad-method.org/how-to/install-custom-modules/)
+also documents non-interactive installation and other local-path layouts.
+
+## 10. Run First Breath
+
+Invoke the installed agent from `~/local-agent`, its canonical home. The
+generated `SKILL.md` runs `wake.py`. A fresh home returns `FIRST_BREATH`, which
+loads `references/first-breath.md` and runs the initializer before the
+conversation begins.
 
 First Breath should establish:
 
@@ -288,7 +329,7 @@ git commit -m "Complete First Breath"
 
 Never stage raw imports casually.
 
-## 9. Import Approved Prior Memory
+## 11. Import Approved Prior Memory
 
 Migrate one document or one coherent batch at a time. Use this review prompt:
 
@@ -313,39 +354,27 @@ Avoid loading an entire archive into `MEMORY.md`. Every token in that file loads
 on every waking. Keep raw history ignored, distill durable knowledge, and put
 detail in indexed files.
 
-## 10. Add an Optional Specialist
+## 12. Verify End-to-End Behavior
 
-`skills/local-agent/examples/external-skill-dispatch.md` is a generic starting
-point. Replace every placeholder, verify the specialist is installed, and move a
-customized copy into `skills/local-agent/references/` before First Breath.
-
-Agent Builder should update SKILL.md and the capability description. The init
-script discovers external capability frontmatter and records the installed skill
-by reference. The specialist keeps ownership of its domain implementation.
-
-If the sanctum already exists, add the dispatch as a learned capability within
-the sanctum and register it in CAPABILITIES.md and INDEX.md. The initializer is
-idempotent and will not overwrite an existing sanctum.
-
-## 11. Verify End-to-End Behavior
-
-Use separate sessions for these checks:
+Use separate sessions from `~/local-agent` for these checks:
 
 1. Ask the agent to remember a harmless preference.
-2. End the session and start another from an unrelated project.
+2. End the session and start another from `~/local-agent`.
 3. Ask it to recall the preference and identify the source file.
 4. Correct the preference.
 5. Start another session and confirm the old value was replaced.
-6. Interrupt a disposable First Breath before `.born`, then confirm the next
-   activation resumes it.
-7. Create a disposable unindexed organic file, run curation, and confirm index
-   drift reports it.
-8. If prior memories were imported, sample facts against their source and check
+6. If prior memories were imported, sample facts against their source and check
    that stale or rejected content is absent.
-9. If a specialist was attached, trigger a request inside its domain and confirm
+7. If a specialist was attached, trigger a request inside its domain and confirm
    direct dispatch.
+8. If the tool supports user-level skill discovery, invoke the agent from an
+   unrelated project and confirm it loads the same canonical sanctum.
 
-## 12. Daily Memory Discipline
+The automated lifecycle suite covers interrupted First Breath and index drift.
+Do not delete `.born` or introduce drift in the live sanctum solely to repeat
+those checks manually.
+
+## 13. Daily Memory Discipline
 
 - Record explicit remember requests immediately.
 - Append meaningful session outcomes to `sessions/YYYY-MM-DD.md`.
@@ -356,20 +385,23 @@ Use separate sessions for these checks:
 - Correct stale facts in place.
 - Review every Git diff before committing memory.
 
-## 13. Move to Another Device
+## 14. Move to Another Device
 
 Clone the private repository or transfer it through an approved encrypted
-channel. Reinstall BMad and the selected tool integrations on the new device:
+channel. Reinstall BMad Builder and the selected tool integrations on the new
+device:
 
 ```bash
 cd ~/local-agent
 npx bmad-method@latest install
 ```
 
-Anything ignored by Git will require a separate, deliberate transfer. Verify
-Recall on harmless content before relying on the new device.
+Then repeat step 9 with the new clone's `skills` directory as the local custom
+source. Local source paths from the old device are not portable. Anything
+ignored by Git requires a separate, deliberate transfer. Verify Recall on
+harmless content before relying on the new device.
 
-## 14. Update BMad Safely
+## 15. Update BMad Safely
 
 Create a reviewed checkpoint before updating:
 
@@ -390,15 +422,17 @@ The agent is ready when:
 
 - Agent Builder Quality Optimize is clean.
 - All lifecycle tests pass.
-- Module Builder validation is clean.
-- First Breath completed and `.born` exists.
+- The generated skill is installed and discoverable in every selected tool.
+- Module Builder validation is clean when step 7 was used.
+- First Breath is complete and `.born` exists.
 - Identity placeholders are resolved.
 - Remember, Recall, correction, resume, and curation work across sessions.
-- Approved prior memories have provenance and rejected content is absent.
+- Approved prior memories have provenance and rejected content is absent when a
+  migration was performed.
 - No credentials or raw imports are tracked.
-- Optional specialists are installed, registered, and dispatch correctly.
+- Optional specialists are installed, registered, and dispatch correctly when
+  configured.
 - The repository has a reviewed commit.
-- A second supported tool can load the same agent and sanctum.
 
 ## Official References
 
