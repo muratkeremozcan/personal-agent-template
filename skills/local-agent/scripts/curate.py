@@ -11,6 +11,11 @@ reliably, and prints them as one JSON object so the curation prompt can reason
 over exact numbers instead of estimates:
 
   - the exact token count of MEMORY.md, and whether it is over its guardrail
+  - the per-file and total token cost of waking, since every identity file is
+    loaded on every session and MEMORY.md is not the only one that grows
+  - whether INDEX.md is still an index: its size against the 25KB/200-line
+    ceiling, and the entries carrying so much prose they belong in the file
+    they point at
   - which session logs have aged past the retention threshold (by the date in
     the filename), so the aged ones can be pruned
   - which files on disk have drifted out of INDEX.md ("an unlisted file is a
@@ -23,12 +28,13 @@ The sanctum lives at one fixed canonical home, independent of the invocation
 directory. This is the same location rule used by wake.py.
 
 Usage:
-    uv run curate.py <project-root> [--days N] [--guardrail N]
+    uv run curate.py <project-root> [--days N] [--guardrail N] [--wake-budget N]
 
-    project-root: the project you're actually working in this session.
-                  Informational only; it never determines sanctum location.
-    --days:       session-log retention threshold in days (default 14)
-    --guardrail:  MEMORY.md soft token guardrail (default 1500)
+    project-root:  the project you're actually working in this session.
+                   Informational only; it never determines sanctum location.
+    --days:        session-log retention threshold in days (default 14)
+    --guardrail:   MEMORY.md soft token guardrail (default 1500)
+    --wake-budget: soft token ceiling for the whole waking load (default 13000)
 
 Exit codes: 0 success, 1 no sanctum found, 2 usage error.
 """
@@ -36,40 +42,32 @@ Exit codes: 0 success, 1 no sanctum found, 2 usage error.
 import argparse
 import importlib
 import json
-import os
-import re
 import sys
 from datetime import date
 from pathlib import Path
 
-SKILL_NAME = "local-agent"
-BORN_MARKER = ".born"
-
-
-def sanctum_home() -> Path:
-    """Canonical sanctum home: $LOCAL_AGENT_HOME if set, else ~/local-agent.
-
-    The invocation directory never changes the sanctum location. Mirrors
-    wake.py's sanctum_home().
-    """
-    override = os.environ.get("LOCAL_AGENT_HOME")
-    home = Path(override) if override else Path.home() / "local-agent"
-    return home.expanduser().resolve()
-
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _sanctum import (  # noqa: E402
+    BORN_MARKER,
+    ENTRY_LINE,
+    IDENTITY_FILES as WAKE_FILES,
+    INDEX_ENTRY_DEMOTE_CHARS,
+    INDEX_ENTRY_TARGET_CHARS,
+    INDEX_MAX_BYTES,
+    INDEX_MAX_LINES,
+    MEMORY_GUARDRAIL_TOKENS,
+    SESSION_RETENTION_DAYS,
+    SKILL_NAME,
+    WAKE_BUDGET_TOKENS,
+    prose_of,
+    sanctum_home,
+    stale_logs,
+)
 
 # The always-present skeleton: structural, not organic, so not index-drift candidates.
-SKELETON = {
-    "INDEX.md",
-    "PERSONA.md",
-    "CREED.md",
-    "BOND.md",
-    "MEMORY.md",
-    "CAPABILITIES.md",
-}
+SKELETON = set(WAKE_FILES)
 # Structural directories that are never individually indexed as organic files.
 STRUCTURAL_DIRS = {"references", "scripts", "sessions"}
-
-DATE_IN_NAME = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 
 
 def count_tokens(text: str) -> tuple[int, str]:
@@ -100,20 +98,84 @@ def measure_memory(sanctum: Path, guardrail: int) -> dict:
     }
 
 
+def measure_wake(sanctum: Path, budget: int) -> dict:
+    """Per-file and total token cost of the waking load.
+
+    MEMORY.md carried the only guardrail, so growth simply moved into the files
+    nothing was measuring. Price the whole load, not one file of it.
+    """
+    per_file: dict[str, int] = {}
+    method = "missing"
+    for name in WAKE_FILES:
+        path = sanctum / name
+        if not path.is_file():
+            per_file[name] = 0
+            continue
+        tokens, method = count_tokens(path.read_text(encoding="utf-8"))
+        per_file[name] = tokens
+    total = sum(per_file.values())
+    return {
+        "per_file": dict(sorted(per_file.items(), key=lambda kv: -kv[1])),
+        "total_tokens": total,
+        "method": method,
+        "budget": budget,
+        "over_budget": total > budget,
+    }
+
+
+def measure_index(sanctum: Path) -> dict:
+    """Is INDEX.md still an index, or has it become a second memory file?
+
+    An entry over the demote threshold is prose that belongs in the file the
+    entry points at. Backticked pointers are excluded from the measurement, so a
+    cluster line listing many filenames is not punished for being a pointer.
+    """
+    index = sanctum / "INDEX.md"
+    if not index.is_file():
+        return {"present": False}
+
+    text = index.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    entries = [ln.rstrip() for ln in lines if ENTRY_LINE.match(ln)]
+    over_target = [ln for ln in entries if len(prose_of(ln)) > INDEX_ENTRY_TARGET_CHARS]
+    over_demote = sorted(
+        (ln for ln in entries if len(prose_of(ln)) > INDEX_ENTRY_DEMOTE_CHARS),
+        key=lambda ln: len(prose_of(ln)),
+        reverse=True,
+    )
+    lengths = sorted(len(prose_of(ln)) for ln in entries)
+    median = lengths[len(lengths) // 2] if lengths else 0
+    size = len(text.encode("utf-8"))
+
+    return {
+        "present": True,
+        "bytes": size,
+        "max_bytes": INDEX_MAX_BYTES,
+        "over_max_bytes": size > INDEX_MAX_BYTES,
+        "lines": len(lines),
+        "max_lines": INDEX_MAX_LINES,
+        "over_max_lines": len(lines) > INDEX_MAX_LINES,
+        "entries": len(entries),
+        "median_entry_prose_chars": median,
+        "entry_target_chars": INDEX_ENTRY_TARGET_CHARS,
+        "entries_over_target": len(over_target),
+        "entry_demote_chars": INDEX_ENTRY_DEMOTE_CHARS,
+        "entries_to_demote": len(over_demote),
+        # Worst offenders first: shorten these, detail moved into the file each
+        # one points at.
+        "worst": [{"chars": len(prose_of(ln)), "line": ln[:120]} for ln in over_demote[:10]],
+    }
+
+
 def stale_session_logs(sanctum: Path, days: int, today: date) -> dict:
+    """Aged logs, sharing wake.py's definition so the two never disagree.
+
+    The First Breath log is exempt there, which keeps this script from reporting
+    a log that is deliberately permanent.
+    """
     sessions = sanctum / "sessions"
     logs = sorted(p.name for p in sessions.glob("*.md")) if sessions.is_dir() else []
-    stale = []
-    for name in logs:
-        m = DATE_IN_NAME.search(name)
-        if not m:
-            continue
-        try:
-            log_date = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        except ValueError:
-            continue
-        if (today - log_date).days > days:
-            stale.append(name)
+    stale = stale_logs(sanctum, days, today)
     return {"total": len(logs), "stale": stale, "days_threshold": days}
 
 
@@ -161,14 +223,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--days",
         type=int,
-        default=14,
-        help="session-log retention threshold (default 14)",
+        default=SESSION_RETENTION_DAYS,
+        help=f"session-log retention threshold (default {SESSION_RETENTION_DAYS})",
     )
     p.add_argument(
         "--guardrail",
         type=int,
-        default=1500,
-        help="MEMORY.md soft token guardrail (default 1500)",
+        default=MEMORY_GUARDRAIL_TOKENS,
+        help=f"MEMORY.md soft token guardrail (default {MEMORY_GUARDRAIL_TOKENS})",
+    )
+    p.add_argument(
+        "--wake-budget",
+        type=int,
+        default=WAKE_BUDGET_TOKENS,
+        help=f"soft token ceiling for the whole waking load (default {WAKE_BUDGET_TOKENS})",
     )
     args = p.parse_args(argv)
 
@@ -185,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
         "born": (sanctum / BORN_MARKER).is_file(),
         "checked_on": today.isoformat(),
         "memory_md": measure_memory(sanctum, args.guardrail),
+        "wake_cost": measure_wake(sanctum, args.wake_budget),
+        "index_md": measure_index(sanctum),
         "session_logs": stale_session_logs(sanctum, args.days, today),
         "index_drift": index_drift(sanctum),
     }

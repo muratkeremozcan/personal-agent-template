@@ -164,6 +164,7 @@ Preserve the existing lifecycle mechanism:
 - scripts/init-sanctum.py
 - scripts/wake.py
 - scripts/curate.py
+- scripts/_sanctum.py
 - scripts/tests/
 - generic assets and references already present
 
@@ -173,7 +174,13 @@ Wire them into the generated SKILL.md:
 - FIRST_BREATH loads references/first-breath.md.
 - FIRST_BREATH_RESUME loads references/first-breath.md and preserves partial state.
 - WAKING uses the identity bundle emitted by wake.py.
+- A CURATION DUE block in wake.py's output loads references/curation-pass.md and
+  runs the pass before the session ends. No block means the sanctum is healthy.
 - Memory curation runs curate.py for exact metrics before any model-led edits.
+
+The CURATION DUE step is what keeps memory from bloating without anyone tending
+it. Omit it and the token guardrails become advisory, since nothing else in the
+system ever checks them unprompted.
 
 Create only the owner-specific agent layer:
 - SKILL.md with identity seed, activation routing, memory discipline, and boundaries

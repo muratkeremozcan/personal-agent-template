@@ -103,7 +103,9 @@ of the index so you can catch the ones you missed.
 ## Token Discipline
 
 Your sanctum loads every session. Every token costs context space for the actual
-conversation. Be ruthless about compression:
+conversation. Be ruthless about compression, and measure with
+`uv run scripts/curate.py {project-root}` rather than by eye; you cannot count
+your own tokens and you will guess low.
 
 - Capture the insight, not the story
 - Prune what's stale: old ideas that went nowhere, resolved questions
@@ -111,6 +113,23 @@ conversation. Be ruthless about compression:
 - Delete what's resolved: completed projects, outdated context
 - Keep MEMORY.md near or under roughly 1500 tokens, a guardrail rather than a
   hard gate; if it has grown well past that, you're not curating hard enough
+- Keep INDEX.md an index: under 200 lines and 25KB, one line per file, pointer
+  plus a hook. An entry whose prose runs past ~200 characters is carrying
+  content that belongs in the file it points at
+
+**Compression is relocation, never deletion.** Shrinking a file by dropping what
+it knows is amnesia with better numbers. Move the detail into the file that owns
+the topic, then shorten the pointer. If a fact exists nowhere else yet, write it
+into its home file first.
+
+**Watch every file that loads on waking, not just MEMORY.md.** A guardrail on one
+file does not stop growth; it relocates it into the files nothing measures.
+`curate.py` prices the whole waking load for exactly this reason.
+
+**You do not have to remember to do any of this.** `wake.py` runs the same checks
+on every activation and prints a **CURATION DUE** block when the sanctum crosses
+a threshold. When it does, `references/curation-pass.md` is the four-phase pass
+to follow. This file is the philosophy; that one is the procedure.
 
 ## Organic Growth
 

@@ -135,12 +135,14 @@ skills/local-agent/
 │   └── external-skill-dispatch.md
 ├── references/
 │   ├── capability-authoring.md
+│   ├── curation-pass.md
 │   ├── first-breath.md
 │   ├── memory-guidance.md
 │   ├── prompt-quality-canon.md
 │   ├── recall.md
 │   └── remember.md
 └── scripts/
+    ├── _sanctum.py
     ├── curate.py
     ├── init-sanctum.py
     ├── wake.py
@@ -148,6 +150,7 @@ skills/local-agent/
         ├── test_curate.py
         ├── test_init_sanctum.py
         ├── test_lifecycle.py
+        ├── test_sanctum_health.py
         └── test_wake.py
 ```
 
@@ -191,23 +194,30 @@ tool discovers SKILL.md (by frontmatter)
         ├── FIRST_BREATH        → references/first-breath.md → init-sanctum.py
         ├── FIRST_BREATH_RESUME → references/first-breath.md → continue saved work
         └── WAKING             → identity loads
-memory upkeep (later, same pattern)
-└── references/memory-guidance.md → curate.py
+                               └── CURATION DUE? → references/curation-pass.md → curate.py
 ```
 
 The scripts are deterministic tools; `SKILL.md` is what knows to call them, and
 Agent Builder is what writes `SKILL.md`.
 
+**Memory upkeep needs no scheduler.** `wake.py` already runs on every activation,
+so it also prices the waking load and prints a `CURATION DUE` block when the
+sanctum crosses a threshold. The agent then follows `references/curation-pass.md`
+before the session ends. There is no cron, no launchd job, no hook, and nothing
+to reinstall on a second machine, which means there is also nothing that can
+silently stop firing.
+
 ## Lifecycle
 
-Three scripts run the mechanism. Each has a single job, and their
+Four scripts run the mechanism. Each has a single job, and their
 responsibilities never overlap:
 
-| Script            | Role    | Runs               | Effect                |
-| ----------------- | ------- | ------------------ | --------------------- |
-| `init-sanctum.py` | Builder | First Breath, once | Scaffolds the sanctum |
-| `wake.py`         | Router  | Every activation   | Reads only            |
-| `curate.py`       | Auditor | During curation    | Reads only            |
+| Script            | Role     | Runs               | Effect                |
+| ----------------- | -------- | ------------------ | --------------------- |
+| `init-sanctum.py` | Builder  | First Breath, once | Scaffolds the sanctum |
+| `wake.py`         | Router   | Every activation   | Reads only            |
+| `curate.py`       | Auditor  | During curation    | Reads only            |
+| `_sanctum.py`     | Contract | Imported by both   | No side effects       |
 
 **`init-sanctum.py` builds the sanctum.** It creates the folder structure,
 copies the templates with config values substituted, copies references and
@@ -230,7 +240,8 @@ Activation
     │       └── resume First Breath
     └── scaffold + .born
         └── WAKING
-            └── print INDEX, PERSONA, CREED, BOND, MEMORY, CAPABILITIES
+            ├── print INDEX, PERSONA, CREED, BOND, MEMORY, CAPABILITIES
+            └── print CURATION DUE, only when a threshold is crossed
 ```
 
 `.born` is the handshake between the builder and the router. `init-sanctum.py`
@@ -241,9 +252,18 @@ greeting over placeholders.
 
 **`curate.py` audits the sanctum.** It reads the same canonical home and reports
 the exact numbers the agent cannot eyeball: `MEMORY.md` token count against its
-guardrail, session logs aged past the retention threshold, and files on disk
-that have drifted out of `INDEX.md`. It never edits anything; the pruning
-judgment stays with the agent, which acts on the report.
+guardrail, the per-file and total cost of the waking load, whether `INDEX.md` is
+still an index rather than a second memory file, session logs aged past the
+retention threshold, and files on disk that have drifted out of `INDEX.md`. It
+never edits anything; the pruning judgment stays with the agent, which acts on
+the report.
+
+**`_sanctum.py` holds the numbers both scripts obey.** Sanctum location, the
+identity-file load order, the thresholds, and the aged-log rule live in one
+module so the router and the auditor can never disagree about whether the sanctum
+is healthy. That disagreement is not hypothetical: a guardrail on `MEMORY.md`
+alone does not stop growth, it relocates growth into whichever loaded file
+nothing measures. Pricing the whole waking load is the fix.
 
 ### The canonical home ties them together
 
