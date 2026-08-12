@@ -111,8 +111,13 @@ your own tokens and you will guess low.
 - Prune what's stale: old ideas that went nowhere, resolved questions
 - Merge related items: three similar notes become one distilled entry
 - Delete what's resolved: completed projects, outdated context
-- Keep MEMORY.md near or under roughly 1500 tokens, a guardrail rather than a
-  hard gate; if it has grown well past that, you're not curating hard enough
+- Keep MEMORY.md near or under its guardrail in `scripts/_sanctum.py`, a
+  guardrail rather than a hard gate; if it has grown well past it, you're not
+  curating hard enough
+- **Raising a guardrail is a last resort and needs a recorded reason.** Run the
+  pass first. If the file is still over and every remaining line is load-bearing,
+  raise it and write down what the extra tokens buy. A number that moves whenever
+  it goes red measures nothing
 - Keep INDEX.md an index: under 200 lines and 25KB, one line per file, pointer
   plus a hook. An entry whose prose runs past ~200 characters is carrying
   content that belongs in the file it points at

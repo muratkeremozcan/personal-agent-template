@@ -45,8 +45,16 @@ INDEX_MAX_BYTES = 25 * 1024
 INDEX_ENTRY_TARGET_CHARS = 150
 INDEX_ENTRY_DEMOTE_CHARS = 200
 
-MEMORY_GUARDRAIL_TOKENS = 1500      # soft, per references/memory-guidance.md
-WAKE_BUDGET_TOKENS = 13000          # soft ceiling for the whole waking load
+# Deliberately tight for a new agent, which has few live threads and should learn
+# the habit early.
+#
+# Raising either number is a last resort with a recorded reason. Run the curation
+# pass first. If MEMORY.md is still over and every remaining line is load-bearing
+# (a decision, a trap, or a live thread with a ball), raise it and write down here
+# what the extra tokens buy. A guardrail that moves whenever it goes red measures
+# nothing, so the reason is the point, not the number.
+MEMORY_GUARDRAIL_TOKENS = 1500
+WAKE_BUDGET_TOKENS = 13000
 SESSION_RETENTION_DAYS = 14
 
 # wake.py has no tiktoken, so it estimates. ~4 bytes per token holds well for
