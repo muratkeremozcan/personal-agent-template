@@ -4,10 +4,13 @@ Build a private AI agent with durable, file-backed memory. Its identity and
 memory live in plain Markdown, while tested Python scripts initialize, load, and
 audit that state across sessions.
 
-This repository is a starting point. BMad Agent Builder personalizes it and
-creates the missing `skills/local-agent/SKILL.md`. The result can have any
-display name, voice, mission, and set of capabilities. `local-agent` remains the
-stable internal name used by the scripts and memory path.
+This public template contains only generic machinery. It must never contain an
+owner's identity or memory. Create a separate private repository before BMad
+Agent Builder personalizes it and writes `skills/local-agent/SKILL.md`.
+
+The resulting agent can have any display name, voice, mission, and set of
+capabilities. `local-agent` remains the stable internal name used by the scripts
+and memory path.
 
 ## What You Get
 
@@ -38,22 +41,33 @@ uv --version
 npx bmad-method install --list-tools
 ```
 
-Your finished repository will contain personal memory. Use a private Git remote
-or keep the repository local. The AI tool and model provider will receive any
-memory loaded into context, so keep credentials and secrets out of the agent's
-files.
+Keep this template repository generic. First Breath and later sessions write
+owner-specific identity and memory into the derived repository, which should
+use a private remote or remain local. The AI tool and model provider will
+receive memory loaded into context, so keep credentials and secrets out of the
+agent's files.
 
 ## Setup
 
 ### 1. Create the Agent Repository
 
-The default memory location is `~/local-agent`, so the simplest setup is to
-clone there. Replace `<repository-url>` with this template's URL or the URL of
-your private fork.
+Create a new private repository from this template, then clone the private copy
+to the default memory location. Replace `<private-repository-url>` with the URL
+of that new repository.
 
 ```bash
-git clone <repository-url> ~/local-agent
+git clone <private-repository-url> ~/local-agent
 cd ~/local-agent
+```
+
+If your Git host cannot copy a template, clone this repository and immediately
+replace its remote before running BMad or First Breath:
+
+```bash
+git clone <template-repository-url> ~/local-agent
+cd ~/local-agent
+git remote set-url origin <private-repository-url>
+git push -u origin main
 ```
 
 If you use another location, set `LOCAL_AGENT_HOME` to its absolute path before
@@ -217,6 +231,8 @@ The template deliberately omits generated or owner-specific content:
 - `_bmad/`, created by the BMad installer and First Breath
 - Raw assistant exports and imported memory
 - Optional Module Builder packaging
+
+Never commit those files back to this public template repository.
 
 ## Advanced Use
 
