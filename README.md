@@ -1,211 +1,230 @@
 # Personal Agent Template
 
-A template for building a private AI agent with durable, file-backed memory across sessions. Plain
-Markdown holds the memory. Tested scripts initialize, load, and audit it deterministically. You
-define the identity.
+Build a private AI agent with durable, file-backed memory. Its identity and
+memory live in plain Markdown, while tested Python scripts initialize, load, and
+audit that state across sessions.
 
-The repository is named `personal-agent-template`. The skill and sanctum use `local-agent` as their
-stable mechanical name. Everything the owner sees is customizable: name, icon, title, voice,
-mission, context, capabilities, and specialist integrations.
+This repository is a starting point. BMad Agent Builder personalizes it and
+creates the missing `skills/local-agent/SKILL.md`. The result can have any
+display name, voice, mission, and set of capabilities. `local-agent` remains the
+stable internal name used by the scripts and memory path.
 
-## Why
+## What You Get
 
-- Memory is durable Markdown on your machine, inspectable, with optional Git history and rollback.
-- The lifecycle is deterministic. Tested scripts scaffold, load, and audit the same state every time.
-- Memory hygiene is enforced rather than hoped for. Waking prices its own context and tells the agent when to curate.
-- Agent Builder gives it any name, voice, and mission while the mechanism underneath stays constant.
-- New capabilities and specialist dispatch drop in without touching the tested core.
+- Markdown templates seed the identity, owner context, memory, and index.
+- `init-sanctum.py` creates the memory store during First Breath.
+- `wake.py` loads the same identity and memory on every activation.
+- `curate.py` reports memory size, stale logs, and index drift.
+- The tests cover initialization, waking, curation, and lifecycle behavior.
 
-This repository ships the generic, tested parts: sanctum initialization and waking, curation guidance
-and auditing, First Breath, Remember, Recall, templates, and tests. BMad Agent Builder creates the
-owner-specific identity seed. First Breath personalizes the sanctum. The optional Module Builder
-packages the finished skill for distribution.
+Nothing runs in the background. The generated skill invokes these scripts when
+you activate the agent.
 
-## Quick Start
+## Before You Start
 
-Requires Node.js 20.12+, Git, [`uv`](https://docs.astral.sh/uv/), and an AI tool supported by the
-BMad installer (`npx bmad-method install --list-tools`).
+Install:
 
-1. Clone into the canonical home.
+- Node.js 20.12 or newer
+- Git
+- [`uv`](https://docs.astral.sh/uv/)
+- An AI coding tool supported by BMad
 
-   ```bash
-   git clone <template-repository-url> ~/local-agent
-   cd ~/local-agent
-   ```
-
-2. Install BMad Builder, selecting **BMad Builder (BMB)**. Add specialist modules such as **Test
-   Architect** if the owner uses them.
-
-   ```bash
-   npx bmad-method@latest install
-   ```
-
-3. Launch one of the installed AI tools from this folder, invoke `bmad-bmb-setup`, then
-   `bmad-agent-builder`. Choose **Build Process (BP)** and point it at `skills/local-agent`. Tell it
-   to preserve the existing scripts, tests, assets, and references. The
-   [Full Guide](docs/full-guide.md) has a complete prompt for this step.
-
-4. Install the generated skill. Run the installer again, choose **Modify Install**, keep your
-   existing selections, and add `~/local-agent/skills` as a custom source. The installer discovers
-   `local-agent` once Agent Builder has written its `SKILL.md`. See the
-   [custom-module guide](https://docs.bmad-method.org/how-to/install-custom-modules/) for
-   non-interactive alternatives.
-
-5. Invoke the generated skill from `~/local-agent`. First activation routes to First Breath,
-   scaffolds `_bmad/memory/local-agent/`, and personalizes the identity. Later activations load the
-   saved sanctum.
-
-## What Ships
-
-```text
-skills/local-agent/
-├── assets/          BOND, CREED, INDEX, MEMORY, PERSONA templates
-├── examples/        external-skill-dispatch.md
-├── references/      capability-authoring, curation-pass, first-breath,
-│                    memory-guidance, prompt-quality-canon, recall, remember
-└── scripts/         _sanctum.py, curate.py, init-sanctum.py, wake.py, tests/
-```
-
-Deliberately omitted, because they are owner-specific or generated:
-
-- `skills/local-agent/SKILL.md`, written by Agent Builder
-- `skills/local-agent/customize.toml`, which memory agents disable by default
-- `_bmad/` installer output and `_bmad/memory/local-agent/` runtime memory
-- prior assistant exports and raw imports
-
-The sanctum is the primary customization surface. Reach for `customize.toml` only when a requirement
-genuinely cannot live there.
-
-## How It Runs
-
-Nothing runs in the background and nothing watches the filesystem. The generated `SKILL.md` is the
-entry point, and it tells the AI tool when to invoke the scripts with `uv`. Until Agent Builder
-writes that file, the scripts sit inert with nothing to call them.
-
-```text
-tool discovers SKILL.md (by frontmatter)
-└── you invoke the skill  (e.g. /local-agent)
-    └── SKILL.md "On Activation" → uv run scripts/wake.py {project-root}
-        ├── FIRST_BREATH        → references/first-breath.md → init-sanctum.py
-        ├── FIRST_BREATH_RESUME → references/first-breath.md → continue saved work
-        └── WAKING              → identity loads
-                                └── CURATION DUE? → references/curation-pass.md → curate.py
-```
-
-Four scripts run the mechanism, with no overlap between them:
-
-| Script            | Role     | Runs               | Effect                |
-| ----------------- | -------- | ------------------ | --------------------- |
-| `init-sanctum.py` | Builder  | First Breath, once | Scaffolds the sanctum |
-| `wake.py`         | Router   | Every activation   | Reads only            |
-| `curate.py`       | Auditor  | During curation    | Reads only            |
-| `_sanctum.py`     | Contract | Imported by both   | No side effects       |
-
-**`init-sanctum.py`** creates the folder structure, copies templates with config values substituted,
-and generates `CAPABILITIES.md` from capability frontmatter. It is idempotent and exits untouched if
-a sanctum already exists. This is the only time a script writes the sanctum; everything after is the
-agent editing its own memory.
-
-**`wake.py`** picks one mode from filesystem state alone:
-
-```text
-Activation
-└── wake.py (canonical home, read-only)
-    ├── no scaffold         → FIRST_BREATH        → load references/first-breath.md
-    ├── scaffold, no .born  → FIRST_BREATH_RESUME → resume the interrupted birth
-    └── scaffold + .born    → WAKING              → print the identity files,
-                                                    then CURATION DUE if a threshold trips
-```
-
-`.born` is the handshake between builder and router. `init-sanctum.py` lays down placeholders and
-never writes it; the conversational First Breath writes it last, once the identity is real. A
-scaffold without `.born` means a birth was interrupted, so waking resumes it instead of greeting over
-placeholders.
-
-**`curate.py`** reports the numbers the agent cannot eyeball: `MEMORY.md` tokens against its
-guardrail, the per-file and total cost of the waking load, whether `INDEX.md` is still an index,
-session logs past the retention threshold, and files that have drifted out of `INDEX.md`. It never
-edits. The pruning judgment stays with the agent.
-
-**`_sanctum.py`** holds sanctum location, identity load order, thresholds, and the aged-log rule, so
-the router and the auditor can never disagree about whether the sanctum is healthy.
-
-## Memory Upkeep
-
-Waking prices its own context. When the sanctum crosses a threshold, `wake.py` prints a
-`CURATION DUE` block and the agent works through `references/curation-pass.md` before the session
-ends.
-
-```text
-===== CURATION DUE =====
-- MEMORY.md is ~2,329 tokens against a 1,500 guardrail
-- 2 session logs are past 14 days and await distilling
-```
-
-No cron, no launchd job, no hook, and nothing to reinstall on a second machine, so there is nothing
-that can silently stop firing.
-
-Two rules make the difference between lean memory and lost memory:
-
-- **Compression is relocation.** Detail moves into the file that owns the topic, then the pointer
-  gets shortened. Shrinking a file by dropping what it knows is amnesia with better numbers.
-- **Price every file that loads on waking.** A guardrail on `MEMORY.md` alone does not stop growth,
-  it relocates growth into whichever loaded file nothing measures.
-
-Check it directly at any time, from the repository root:
+Check your setup:
 
 ```bash
-uv run skills/local-agent/scripts/curate.py .          # exact numbers
-uv run skills/local-agent/scripts/wake.py . | tail -8  # what the agent sees
+node --version
+git --version
+uv --version
+npx bmad-method install --list-tools
 ```
 
-## The Canonical Home
+Your finished repository will contain personal memory. Use a private Git remote
+or keep the repository local. The AI tool and model provider will receive any
+memory loaded into context, so keep credentials and secrets out of the agent's
+files.
 
-`wake.py` and `curate.py` resolve one fixed sanctum home and ignore the invocation directory, so an
-unrelated project can never trigger a false First Breath or spawn a second identity. It defaults to
-`~/local-agent`. Set `LOCAL_AGENT_HOME` when the repository lives elsewhere:
+## Setup
+
+### 1. Create the Agent Repository
+
+The default memory location is `~/local-agent`, so the simplest setup is to
+clone there. Replace `<repository-url>` with this template's URL or the URL of
+your private fork.
+
+```bash
+git clone <repository-url> ~/local-agent
+cd ~/local-agent
+```
+
+If you use another location, set `LOCAL_AGENT_HOME` to its absolute path before
+running the agent:
 
 ```bash
 export LOCAL_AGENT_HOME=/absolute/path/to/local-agent
 ```
 
-The `project-root` argument is situational context for the agent and never relocates the sanctum. It
-matters mechanically in exactly one place: `init-sanctum.py` scaffolds under `<project-root>/_bmad`,
-so First Breath must run with the canonical home as its project root.
+### 2. Install BMad Builder
 
-## Tests
+Run the installer from the repository root:
 
 ```bash
-uv run --with pytest --with tiktoken python -m pytest skills/local-agent/scripts/tests -q
+npx bmad-method install
 ```
 
-## Quick Answers
+In the installer:
 
-**Why local files instead of hosted assistant memory?** Plain Markdown gives inspectable state,
-version history, portability, and direct control over retention. The same approved files serve any
-tool that can load the skill.
+1. Select **BMad Builder (BMB)**.
+2. Select the AI tool you use.
+3. Keep the installation scoped to this repository.
 
-**Does local storage mean the content stays on the device?** No. The AI tool and model provider
-receive whatever context is read from these files. Review their data handling, follow your
-organization's policy, and keep credentials out of the sanctum.
+Then open the selected AI tool in this folder and invoke `bmad-bmb-setup` once.
 
-**Is it safe?** The design is transparent and auditable. It is not a security boundary. File
-permissions, Git remotes, device security, provider terms, and your own review discipline determine
-the real posture.
+### 3. Personalize the Agent
 
-**What does it cost?** The template is plain files and open tooling. AI tools, model usage, private
-Git hosting, and specialist modules carry their own costs. The design is reversible, since the
-durable state is ordinary files.
+Invoke `bmad-agent-builder` and choose **Build Process (BP)** in guided mode.
+Point it to the absolute path of `skills/local-agent`.
 
-**Why ship a template at all?** Lifecycle code should be deterministic. Recreating wake,
-initialization, and curation scripts on every Agent Builder run revives bugs that were already
-solved.
+Tell Agent Builder to preserve the existing scripts, tests, assets, and
+references. It should create the owner-specific identity layer, including
+`skills/local-agent/SKILL.md`. Use the complete
+[Agent Builder prompt](docs/full-guide.md#6-customize-with-agent-builder) when
+you want a reliable copy-and-paste starting point.
 
-## Full Guide
+Before continuing, confirm that this file now exists:
 
-The [Full Guide](docs/full-guide.md) covers prerequisites, repository creation, BMad Builder
-installation, customization paths, specialist dispatch, Agent Builder, Module Builder packaging,
-lifecycle tests, skill installation, First Breath, importing prior memory, end-to-end verification,
-daily memory discipline, moving to another device, and safe BMad updates. It also carries the
-[Definition of Done](docs/full-guide.md#definition-of-done) and
-[official BMad references](docs/full-guide.md#official-references).
+```text
+skills/local-agent/SKILL.md
+```
+
+### 4. Run the Lifecycle Tests
+
+```bash
+uv run --with pytest --with tiktoken \
+  python -m pytest skills/local-agent/scripts/tests -q
+```
+
+### 5. Install the Generated Skill
+
+Run the BMad installer again:
+
+```bash
+npx bmad-method install
+```
+
+Choose the full modification flow, preserve your existing selections, and add
+`~/local-agent/skills` as a custom local source. The installer discovers
+`local-agent` from the `SKILL.md` created in step 3. The official
+[custom source guide](https://docs.bmad-method.org/how-to/install-custom-modules/)
+also covers command-line installation and other directory layouts.
+
+Restart or reload your AI tool if the skill does not appear immediately.
+
+### 6. Complete First Breath
+
+Invoke `local-agent` from `~/local-agent` using your AI tool's normal skill
+syntax. On its first activation, the agent will:
+
+1. Create `_bmad/memory/local-agent/`.
+2. Ask about its identity, mission, working style, and memory boundaries.
+3. Write the resulting Markdown files.
+4. Create `.born` last to mark First Breath complete.
+
+If the session stops early, invoke the agent again. It will resume First Breath
+from the saved state.
+
+Review the new files before committing them:
+
+```bash
+git status
+git diff
+```
+
+## Verify Memory Across Sessions
+
+Use separate sessions for this check:
+
+1. Ask the agent to remember a harmless preference.
+2. Start a new session and ask it to recall that preference and name the source
+   file.
+3. Correct the preference.
+4. Start another session and confirm that the current value replaced the old
+   one.
+
+This tests the user-facing flow that matters most: remember, reload, recall, and
+correct.
+
+## Where the Data Lives
+
+The runtime memory store is:
+
+```text
+~/local-agent/_bmad/memory/local-agent/
+├── INDEX.md
+├── PERSONA.md
+├── CREED.md
+├── BOND.md
+├── MEMORY.md
+├── CAPABILITIES.md
+├── capabilities/
+├── knowledge/
+├── references/
+├── scripts/
+└── sessions/
+```
+
+The repository intentionally tracks this directory so Git can provide history
+and rollback. The optional `knowledge/private/` directory is ignored as a
+device-local convention. File permissions, remote access, device security, and
+provider policies still determine the real privacy boundary.
+
+`wake.py` and `curate.py` always use the canonical home, regardless of the
+project where the agent was invoked. The default is `~/local-agent`;
+`LOCAL_AGENT_HOME` overrides it. This prevents a second identity from being
+created when you invoke the agent from another project.
+
+## Lifecycle
+
+- No memory store: `FIRST_BREATH` starts initialization.
+- Memory store without `.born`: `FIRST_BREATH_RESUME` continues initialization.
+- Memory store with `.born`: `WAKING` loads the identity and memory files.
+
+Every wake also checks lightweight memory guardrails. When curation is due, the
+generated skill loads the curation instructions and runs the exact audit before
+making model-led edits.
+
+Run the read-only diagnostics yourself at any time:
+
+```bash
+uv run skills/local-agent/scripts/wake.py .
+uv run skills/local-agent/scripts/curate.py .
+```
+
+## Repository Layout
+
+```text
+skills/local-agent/
+├── assets/       Seed templates for the runtime memory store
+├── examples/     Optional specialist dispatch example
+├── references/   First Breath, memory, curation, and capability guidance
+└── scripts/      Lifecycle scripts and tests
+docs/
+└── full-guide.md
+```
+
+The template deliberately omits generated or owner-specific content:
+
+- `skills/local-agent/SKILL.md`, created by Agent Builder
+- `_bmad/`, created by the BMad installer and First Breath
+- Raw assistant exports and imported memory
+- Optional Module Builder packaging
+
+## Advanced Use
+
+Read the [Full Guide](docs/full-guide.md) for existing-assistant migration,
+specialist dispatch, optional Module Builder packaging, detailed end-to-end
+checks, memory maintenance, device moves, safe BMad updates, and the complete
+definition of done.
+
+Current BMad behavior is documented in the official
+[installation guide](https://docs.bmad-method.org/how-to/install-bmad/) and
+[Builder command reference](https://bmad-builder-docs.bmad-method.org/reference/builder-commands/).
