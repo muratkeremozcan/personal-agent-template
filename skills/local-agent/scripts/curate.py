@@ -63,6 +63,7 @@ from _sanctum import (  # noqa: E402
     sanctum_home,
     stale_logs,
     archive_root,
+    ArchiveMisconfigured,
     archive_target,
 )
 
@@ -178,7 +179,15 @@ def stale_session_logs(sanctum: Path, days: int, today: date) -> dict:
     sessions = sanctum / "sessions"
     logs = sorted(p.name for p in sessions.glob("*.md")) if sessions.is_dir() else []
     stale = stale_logs(sanctum, days, today)
-    root = archive_root()
+    try:
+        root = archive_root()
+    except ArchiveMisconfigured as exc:
+        return {
+            "total": len(logs), "stale": stale, "days_threshold": days,
+            "disposition": "misconfigured",
+            "error": str(exc),
+            "note": "Do not prune anything until this is corrected.",
+        }
     out = {"total": len(logs), "stale": stale, "days_threshold": days}
     if root is None:
         # No archive configured. Say so rather than reporting a bare age, because an

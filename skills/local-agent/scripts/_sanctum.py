@@ -82,6 +82,10 @@ def sanctum_path() -> Path:
     return sanctum_home() / "_bmad" / "memory" / SKILL_NAME
 
 
+class ArchiveMisconfigured(Exception):
+    """LOCAL_AGENT_ARCHIVE names a path that is not a directory."""
+
+
 def archive_root() -> Path | None:
     """The cold archive, if the owner has set one up.
 
@@ -102,7 +106,17 @@ def archive_root() -> Path | None:
     override = os.environ.get("LOCAL_AGENT_ARCHIVE")
     root = Path(override) if override else sanctum_home() / "archive"
     root = root.expanduser().resolve()
-    return root if root.is_dir() else None
+    if root.is_dir():
+        return root
+    if override:
+        # An explicit setting pointing nowhere is a misconfiguration, and it must never
+        # read as "the owner chose not to have an archive". Those two states permit
+        # different things: one permits deletion, the other is a typo that would cause it.
+        raise ArchiveMisconfigured(
+            f"LOCAL_AGENT_ARCHIVE is set to {root}, which is not a directory. "
+            "Create it, correct the variable, or unset it to run without an archive."
+        )
+    return None
 
 
 def archive_target(filename: str, root: Path) -> str | None:

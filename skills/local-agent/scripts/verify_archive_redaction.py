@@ -29,10 +29,32 @@ import sys
 import unicodedata
 from pathlib import Path
 
-# Sentences shorter than this are dropped before comparison. Withheld blocks contain
-# ordinary connective prose ("He said that.") that legitimately recurs in the surviving
-# text, and matching on it would make every archive fail.
+# Sentences shorter than this are dropped from the sentence check. Withheld blocks contain
+# ordinary connective prose ("He said that.") that legitimately recurs in the surviving text.
+# Short sentences are NOT thereby unchecked: the token sweep below covers them, which is what
+# closes the hole where "PersonC was fired." passed because it was 18 characters long.
 MIN_SENTENCE_CHARS = 24
+
+# Tokens this common carry no signal, so intersecting on them would flag every archive.
+# Deliberately short: the cost of a false positive is a human reading one line, and the cost
+# of a false negative is a secret in a synced repository that cannot be recalled.
+STOPWORDS = frozenset("""
+about after again against because been before being between both came come could does
+doing done down during each else even ever every from further had has have having here
+hers herself him himself his how into itself just like made make many more most much must
+never next only other others ought our ours ourselves out over own same she should since
+some such than that thats their theirs them themselves then there these they this those
+through time under until very was were what when where which while who whom why will with
+would your yours yourself yourselves
+""".split())
+
+# Frontmatter keys whose values are structural rather than content. Their words are not
+# evidence of a leak.
+STRUCTURAL_KEYS = frozenset({"type", "date", "redacted", "redacted_count", "tags"})
+
+# A digit run this long is an identifier, an amount, or a date-like figure. Exactly the
+# shape of the thing worth withholding, so digits are checked rather than skipped.
+MIN_DIGIT_TOKEN = 4
 
 # A run of this many consecutive words from a withheld block appearing in the archived note
 # is treated as a leak even when no whole sentence matched. Catches a rewritten sentence
@@ -101,9 +123,9 @@ def frontmatter_and_body(text: str) -> tuple[str, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Verify an archived archived note leaks nothing that was withheld from it."
+        description="Verify an archived note leaks nothing that was withheld from it."
     )
-    parser.add_argument("archived_note", type=Path, help="the note written into vault/log/")
+    parser.add_argument("archived_note", type=Path, help="the note written into <archive>/log/")
     parser.add_argument(
         "redacted_file",
         type=Path,
@@ -114,6 +136,10 @@ def main() -> int:
         type=int,
         default=SHINGLE_WORDS,
         help=f"consecutive-word run treated as a leak (default {SHINGLE_WORDS})",
+    )
+    parser.add_argument(
+        "--allow", action="append", default=[], metavar="TOKEN",
+        help="token that may appear on both sides (repeatable); for genuine collisions only",
     )
     parser.add_argument("--quiet", action="store_true", help="print only failures")
     args = parser.parse_args()
@@ -153,20 +179,60 @@ def main() -> int:
                 f"{' '.join(shingle)!r}"
             )
 
-    # 3. The slug and the source frontmatter are copies of the sanctum filename and never
-    #    pass through the body gate, so check them against the withheld text directly.
-    #    Both sides split on non-alphanumerics: a hyphen-joined slug compared as prose is
-    #    one opaque token, and matches nothing.
+    # 3. Token sweep over the WHOLE archived note.
+    #
+    # The earlier version checked only the filename and the `source:` line, which left two
+    # holes a review found by constructing them. A withheld sentence under the length floor
+    # ("PersonC was fired.") survived the sentence check and was short enough to produce no
+    # matching word run. And an entity named only inside a withheld block could be written
+    # into `people:` frontmatter, which is precisely the leak this capability's own
+    # documentation calls the subtlest it can produce: the body shows nothing while the
+    # frontmatter advertises who the withheld block was about.
+    #
+    # So every distinctive token from the withheld text is now looked for everywhere in the
+    # archived note: body, all frontmatter, and any generated link block.
+    #
+    # This will occasionally flag a word that legitimately appears on both sides. That is the
+    # intended bias. A false positive costs a person one line of reading; a false negative is
+    # a secret in a synced repository that cannot be recalled. `--allow` exists for the
+    # genuine collisions.
     withheld_body = PROVENANCE.sub(" ", withheld_raw)
-    withheld_idents = {
-        t for t in IDENT_SPLIT.split(normalize(withheld_body)) if len(t) > 3 and not t.isdigit()
-    }
+    allowed = {a.lower() for a in args.allow}
 
-    def taint(text: str, ignore: set[str] = frozenset()) -> list[str]:
-        found = {t for t in IDENT_SPLIT.split(normalize(text)) if t in withheld_idents}
-        return sorted(found - ignore)
+    def distinctive(text: str) -> set[str]:
+        out = set()
+        for t in IDENT_SPLIT.split(normalize(text)):
+            if not t or t in STOPWORDS or t in allowed:
+                continue
+            if t.isdigit():
+                if len(t) >= MIN_DIGIT_TOKEN:
+                    out.add(t)
+            elif len(t) > 3:
+                out.add(t)
+        return out
 
-    slug_hits = taint(args.archived_note.stem)
+    withheld_idents = distinctive(withheld_body)
+
+    # Structural frontmatter is excluded so `type: session-log` and a `date:` shared with the
+    # withheld block's own heading do not read as leaks.
+    content_fm = "\n".join(
+        line for line in vault_fm.splitlines()
+        if not any(line.startswith(k + ":") for k in STRUCTURAL_KEYS)
+    )
+    searchable = f"{args.archived_note.stem}\n{content_fm}\n{vault_body}"
+
+    leaked_tokens = sorted(distinctive(searchable) & withheld_idents)
+    if leaked_tokens:
+        failures.append(
+            "tokens from the withheld text appear in the archived note: "
+            f"{leaked_tokens}. Remove them, or pass --allow for each that is genuinely "
+            "unrelated to what was withheld."
+        )
+
+    # The filename and `source:` get named separately, because the fix differs: they are
+    # copies of the sanctum filename rather than authored content, so the remedy is a
+    # re-slug and `source_withheld: true` rather than an edit.
+    slug_hits = sorted(distinctive(args.archived_note.stem) & withheld_idents)
     if slug_hits:
         failures.append(
             f"archived note filename shares distinctive tokens with withheld text: {slug_hits}. "
@@ -175,7 +241,9 @@ def main() -> int:
 
     for line in vault_fm.splitlines():
         if line.startswith(("source:", "source_path:")):
-            src_hits = taint(line, ignore={"sessions", "redacted", "source", "path"})
+            src_hits = sorted(
+                distinctive(line) & withheld_idents - {"sessions", "redacted", "source", "path"}
+            )
             if src_hits:
                 failures.append(
                     f"`{line.strip()}` shares distinctive tokens with withheld text: "

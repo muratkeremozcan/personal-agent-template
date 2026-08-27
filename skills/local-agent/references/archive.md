@@ -27,7 +27,7 @@ exemption lives in `stale_logs()` in `scripts/_sanctum.py` and reads the `.born`
 whatever date the sanctum was born on).
 
 the owner can also invoke it directly: "archive that log", "archive everything before August", "put the
-QBR sessions in the archive." Direct invocation runs the same gate in the same order. Nothing about
+last quarter's planning notes in the archive." Direct invocation runs the same gate in the same order. Nothing about
 being asked by name relaxes the redaction rules.
 
 The First Breath log is never archived and never pruned. It stays in `sessions/` because the record
@@ -48,7 +48,7 @@ aged list and the archive location from ever disagreeing about which month a log
 
 The slug is `YYYY-MM-DD-<topic>`, which is the sanctum filename unchanged when the log already
 carries a topic suffix. `sessions/YYYY-MM-DD-example-topic.md` becomes
-`<archive>/log/2026/08/2026-08-26-qbr-preread-v4-comment-pass.md`. A bare day log such as
+`<archive>/log/2026/05/2026-05-04-example-topic.md`. A bare day log such as
 `sessions/2026-08-19.md` has no topic, so derive one from the log's own H1 or its first
 `## Session — ...` line: lowercase, hyphenated, six words at most. Keeping the date inside the slug
 makes the note sort correctly in a flat search and keeps two same-topic logs from different months
@@ -72,7 +72,7 @@ anything is written. When it passes, proceed as above. When it fails:
 - Set `source_withheld: true` in the frontmatter and omit `source` entirely. Provenance still exists
   in `sessions/redacted/`, which never leaves the machine.
 - Print the category and the date in the withheld notice, never the original path.
-- Say so in the report. A renamed slug is something the owner should see, because it means a filename he
+- Say so in the report. A renamed slug is something the owner should see, because it means a filename they
   chose was carrying something it should not have.
 
 The same check applies to any H1 or `## Session — ...` line used to derive a topic for a bare day
@@ -81,7 +81,7 @@ log. A heading is as public as a filename once it becomes the slug.
 If the target file already exists and its `source` frontmatter already lists this sanctum filename,
 the log is archived and there is nothing to do. If the target exists from a different source, append
 the new content under a `## Archived from <filename>` heading and merge the frontmatter lists.
-Overwriting a archive note is how five years of delivery record gets quietly destroyed.
+Overwriting an archive note is how five years of delivery record gets quietly destroyed.
 
 ## The archived note
 
@@ -114,10 +114,12 @@ would have announced who the withheld block was about while the body showed noth
 
 `date` is the log's date. `source` is the original sanctum path, so provenance survives even if the
 slug is later renamed. The three link lists are quoted wikilinks, which is the form Obsidian and compatible readers
-requires for internal links inside list properties.
+require for internal links inside list properties.
 
-Fill the link lists from `scripts/archive_taxonomy.json`, which is the shared taxonomy the archive
-scripts already use:
+Fill the link lists from the deployment's shared taxonomy file if it has one. This template ships
+no such file, because what counts as a person, a theme or a repository is deployment-specific.
+Without one, derive the lists from the entity notes that already exist in the archive and from the
+names appearing in the log itself. Either way the shape is the same:
 
 - **people** — the keys under `people`, matched on the key or any of its `aliases`. Link target is
   `person/<Name>`, using the taxonomy key's exact capitalisation so every spelling and nickname of one person
@@ -153,10 +155,10 @@ Append the guarded block so the edges exist regardless of how the build treats f
 The block carries exactly the same entities as the frontmatter, computed from the same redacted
 text. Any entity that reaches one and not the other is a bug, and the read-back in step 5 checks it.
 
-Same markers `the linkifier` uses. Note that `vault_taxonomy.json` lists `log` under `skip_dirs`,
-so `the linkifier` will not process archived notes; Archive owns these blocks for their whole
-life and must write them correctly on the first pass. Running the linkifier over `<archive>/log/` to
-repair them is not an available fallback.
+If the deployment runs a separate tool that maintains these blocks across the archive, check
+whether it excludes `log/` from its scan; the reference implementation does. Where it is excluded,
+Archive owns these blocks for their whole life and must write them correctly on the first pass,
+because re-running that tool over the archive is not an available repair.
 
 ## INDEX.md
 
@@ -166,17 +168,17 @@ which is the failure INDEX.md exists to prevent.
 The existing entry for a real log reads:
 
 ```markdown
-  - `sessions/YYYY-MM-DD-example-topic.md`: all 13 open Google Doc
-    comments on the QBR unit-test-debt preread mapped to fixes in v4, the Qodo
-    pricing research, and the still-open items only the owner can answer.
+  - `sessions/2026-05-04-example-topic.md`: the review comments on the draft
+    mapped to fixes, the vendor pricing research, and the open items only the
+    owner can answer.
 ```
 
 After archiving it reads:
 
 ```markdown
-  - `<archive>/log/2026/08/2026-08-26-qbr-preread-v4-comment-pass.md`: archived. The 13
-    Google Doc comments on the QBR preread mapped to fixes in v4, Qodo pricing, and the
-    items only the owner can answer. One block withheld, in `sessions/redacted/`.
+  - `<archive>/log/2026/05/2026-05-04-example-topic.md`: archived. Review comments
+    mapped to fixes, vendor pricing, and the items only the owner can answer.
+    One block withheld, in `sessions/redacted/`.
 ```
 
 Keep the pointer inside backticks. `prose_of()` in `scripts/_sanctum.py` strips backticked spans
@@ -192,11 +194,10 @@ wholesale rewrite drops whatever another instance just wrote.
 
 ## The redaction gate
 
-The archive is git-backed, may gain a private remote once D4 is settled, and is copied again by
-a sync service, if one is configured. Anything this capability moves may therefore be replicated to
-further durable stores,
-one of them off this machine. The gate is what stands between the sanctum's confidential material
-and those copies, and it runs on every archive, including the ones the owner asks for by name.
+An archive is normally git-backed, and may be copied again by a sync service or a remote.
+Anything this capability moves may therefore be replicated to further durable stores, some of them
+off this machine. The gate is what stands between the sanctum's confidential material and those
+copies, and it runs on every archive, including the ones the owner asks for by name.
 
 ### 1. Confidentiality markers
 
@@ -217,7 +218,7 @@ stays between us: the Budapest office may close" carries no token from an earlie
 list, names no individual against a personnel topic, and is no credential. It is still marked. When a
 line reads as something someone asked to be kept quiet, treat it as marked and move to fail closed.
 
-One marked block exists in the sanctum today. **Its text is deliberately not reproduced here.** A
+A sanctum in real use accumulates marked blocks. **No real one is reproduced in this file.** A
 specification for a confidentiality gate is a repo file that gets committed, synced and read by
 agents, so quoting the secret into it defeats the gate at the only point where the gate is being
 defined. Read the live instance at `sessions/YYYY-MM-DD-example-topic.md:3-6` when you
@@ -238,7 +239,7 @@ deck, or any message to a third party.
 ```
 
 Note that no two sources describe the real block the same way. Earlier drafts of
-Two separate documents in one real deployment both cited a marked block as reading
+In one real deployment, two separate documents each cited a marked block as reading
 "Confidential, never repeat", a paraphrase of a string that exists nowhere on disk. Match on tokens
 for exactly this reason. A gate built to match the quoted phrase would have let the only real
 instance in the sanctum through untouched.
@@ -264,7 +265,7 @@ lines. These are examples of a shape rather than a lookup table; match the inten
   The paragraph holding the marker contains only the label, so withholding that paragraph withholds
   nothing, and the secret sits in the next paragraph carrying no marker of its own. Where the secret
   is neither personnel nor a credential, an unannounced org change, a deal, a strategy decision, no
-  other rule catches it either and it archives to the git-backed, Sync-replicated archive.
+  other rule catches it either and it archives to a git-backed, possibly replicated store.
 
   Test for it by stripping the marker span from its line. When what remains is empty, or punctuation
   and nothing else, the marker is a label for what follows rather than a prefix to its own sentence,
@@ -291,11 +292,11 @@ band, level, raise · hiring and firing decisions, candidate assessments, interv
 disciplinary action or a complaint · health, medical, family or immigration circumstances.
 
 A named individual means any person's proper name, which includes every key and alias under `people`
-in `scripts/archive_taxonomy.json` and any other given name or full name appearing in the log. Company
+in the deployment's taxonomy file, if it has one, plus any other given name or full name appearing in the log. Company
 names, product names and team names are not people.
 
 The gate protects third parties. the owner's own level, compensation, promotion case and job-security
-thread are his own record in his own archive, and they archive normally.
+thread are the owner's own record in their own archive, and they archive normally.
 
 Org-level facts with no individual attached archive normally too: "the TA role is being phased out
 org-wide, no new hires" is a structural fact about the organisation. The moment a name attaches to
@@ -310,7 +311,7 @@ see that something is missing will conclude the record is complete.
 ```markdown
 > [!warning] Withheld from archive
 > 1 block withheld: personnel. Full text stays in the sanctum at
-> `sessions/redacted/2026-08-26-qbr-preread-v4-comment-pass.md`.
+> `sessions/redacted/2026-05-04-example-topic.md`.
 ```
 
 Set `redacted: true` and `redacted_count: N` in the frontmatter so a Dataview query can list every
@@ -336,19 +337,20 @@ Uncertainty resolves toward the sanctum. Every branch below keeps material out o
 the owner what happened.
 
 - **Uncertain about a block.** Withhold it. Count it under the closest category, defaulting to
-  `marked-confidential`. A block that stayed behind can be archived next week after he looks at it;
+  `marked-confidential`. A block that stayed behind can be archived next week after they look at it;
   a block that reached a synced git repo cannot be recalled.
 - **Uncertain about the file.** When redaction would leave a stub, or the log's subject is a
   personnel discussion end to end, do not archive it at all. Leave the file in `sessions/`, leave its
   INDEX.md entry pointing at the sanctum, and say so in one line. Never skip a file silently: a log
   that neither archived nor reported looks identical to one that was never aged.
 - **Anything shaped like a credential.** Tokens, API keys, cookies, OAuth token paths, private
-  endpoints, session identifiers. Withhold under `security` with no further analysis. The sanctum's
-  own CAPABILITIES.md holds real Slack `xoxc`/`xoxd` values and an OAuth token path, so this material
-  is genuinely present and it is worth exactly one rule.
+  endpoints, session identifiers. Withhold under `security` with no further analysis. An agent's own
+  `CAPABILITIES.md` tends to accumulate exactly this, because recording how to reach a service is
+  useful and recording the credential alongside it is the path of least resistance. Assume the
+  material is present rather than checking, and spend one rule on it.
 - **Nothing is deleted before it is shown.** Report the withheld list to the owner, by file and category,
-  before any sanctum log is pruned. He is the only one who can tell you a withheld block was fine or
-  a passed block was not.
+  before any sanctum log is pruned. They are the only one who can tell you a withheld block was fine
+  or a passed block was not.
 
 ### Where the withheld material goes
 
@@ -394,4 +396,4 @@ deleted only after its archive note has been verified. A log pruned ahead of eit
 
 One line per archived log when the pass is quiet, in the same register as the rest of curation:
 housekeeping, delivered without ceremony. Anything withheld or held back gets named explicitly,
-because that is the part he has to make a decision about.
+because that is the part they have to make a decision about.

@@ -33,7 +33,7 @@ mkdir -p ~/local-agent/archive
 export LOCAL_AGENT_ARCHIVE=~/notes/agent-archive
 ```
 
-`curate.py` picks it up automatically. With no archive configured it says so explicitly
+`curate.py` picks it up automatically and prints resolved absolute paths, not `~` forms. With no archive configured it says so explicitly
 rather than reporting a bare age, because an aged log with no stated destination reads as an
 instruction to delete.
 
@@ -42,7 +42,7 @@ instruction to delete.
   "stale": ["2026-05-04-topic.md"],
   "disposition": "archive",
   "destination": [
-    {"log": "2026-05-04-topic.md", "archives_to": "~/local-agent/archive/log/2026/05/2026-05-04-topic.md"}
+    {"log": "2026-05-04-topic.md", "archives_to": "/Users/you/local-agent/archive/log/2026/05/2026-05-04-topic.md"}
   ],
   "procedure": "references/archive.md",
   "gate": "scripts/verify_archive_redaction.py"

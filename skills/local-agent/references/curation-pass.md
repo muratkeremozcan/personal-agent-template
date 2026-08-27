@@ -91,9 +91,11 @@ archive. Follow `references/archive.md`, which owns the redaction gate deciding 
 sanctum, and run `scripts/verify_archive_redaction.py` before any prune. `curate.py` reports each
 aged log with the path it archives to.
 
-Deleting an aged log outright is the one move this phase forbids, and it is only available when no
-archive is configured at all. If `curate.py` reports "no archive configured", set one up before
-pruning anything; the whole point of this phase is that leanness comes from relocation.
+Deleting an aged log outright is the one move this phase forbids. If `curate.py` reports "no
+archive configured", set one up before pruning anything; the whole point of this phase is that
+leanness comes from relocation. If it reports "misconfigured", the archive path is set to somewhere
+that does not exist, which is a typo rather than a decision, so correct it and prune nothing until
+you have.
 
 The First Breath log is never pruned however stale it reads. Take which log that is from `.born`
 rather than from memory or from a filename written into this document, since a sanctum that was

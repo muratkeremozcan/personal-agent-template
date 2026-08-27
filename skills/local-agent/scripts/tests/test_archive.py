@@ -32,10 +32,21 @@ class ArchiveRootTest(unittest.TestCase):
         os.environ.clear()
         os.environ.update(self._env)
 
-    def test_absent_when_no_directory_exists(self):
+    def test_absent_when_unset_and_default_missing(self):
+        # Unset is a decision and returns None. An explicit bad path is a typo and raises;
+        # see test_misconfigured_path_raises_rather_than_reading_as_absent.
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ.pop("LOCAL_AGENT_ARCHIVE", None)
+            os.environ["LOCAL_AGENT_HOME"] = tmp
+            self.assertIsNone(_sanctum.archive_root())
+
+    def test_misconfigured_path_raises_rather_than_reading_as_absent(self):
+        # "The owner chose not to have an archive" and "the variable has a typo" permit
+        # different things. Collapsing them lets a typo silently license deletion.
         with tempfile.TemporaryDirectory() as tmp:
             os.environ["LOCAL_AGENT_ARCHIVE"] = str(Path(tmp) / "nope")
-            self.assertIsNone(_sanctum.archive_root())
+            with self.assertRaises(_sanctum.ArchiveMisconfigured):
+                _sanctum.archive_root()
 
     def test_found_when_directory_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,6 +134,42 @@ class RedactionGateTest(unittest.TestCase):
         # 2 rather than 1: a check that could not run must block the prune exactly
         # as a failing one does, and must be distinguishable from a clean pass.
         self.assertEqual(rc, 2)
+
+    def test_short_withheld_sentence_is_caught(self):
+        # Regression: a withheld sentence under the length floor once passed both the
+        # sentence check and the word-run check, so a termination and a severance figure
+        # archived verbatim. The token sweep is what closes this.
+        withheld = ("## Withheld from 2026-05-04-topic.md\n\n"
+                    "**Confidential:** PersonC was fired. Severance: 185000.\n")
+        leaked = self.CLEAN.replace("Ordinary content.",
+                                    "Ordinary content. PersonC was fired. Severance: 185000.")
+        self.assertEqual(self._run(leaked, withheld), 1)
+
+    def test_entity_named_only_in_withheld_block_is_caught(self):
+        # Regression, and the leak this capability's own documentation calls the subtlest
+        # it can produce: the body shows nothing while the frontmatter announces who the
+        # withheld block was about. Only `source:` used to be checked.
+        withheld = ("## Withheld from 2026-05-04-topic.md\n\n"
+                    "**Confidential:** Zsuzsanna is being managed out after a review.\n")
+        note = self.CLEAN.replace("redacted: true",
+                                  'people: ["[[person/Zsuzsanna]]"]\nredacted: true')
+        self.assertEqual(self._run(note, withheld), 1)
+
+    def test_allow_permits_a_genuine_collision(self):
+        # The sweep is deliberately biased toward flagging, so an escape hatch has to exist
+        # or a legitimate shared word makes an archive permanently unrunnable.
+        withheld = ("## Withheld from 2026-05-04-topic.md\n\n"
+                    "**Confidential:** PersonC was fired.\n")
+        leaked = self.CLEAN.replace("Ordinary content.", "Ordinary content. PersonC was fired.")
+        with tempfile.TemporaryDirectory() as tmp:
+            a = Path(tmp) / "2026-05-04-topic.md"; a.write_text(leaked)
+            w = Path(tmp) / "withheld.md"; w.write_text(withheld)
+            rc = subprocess.run(
+                [sys.executable, str(VERIFIER), str(a), str(w),
+                 "--allow", "personc", "--allow", "fired", "--quiet"],
+                capture_output=True, text=True,
+            ).returncode
+        self.assertEqual(rc, 0)
 
     def test_empty_withheld_file_fails_closed(self):
         # An empty redacted file means the withheld material was lost. Passing here
