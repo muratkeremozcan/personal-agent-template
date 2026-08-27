@@ -82,6 +82,43 @@ def sanctum_path() -> Path:
     return sanctum_home() / "_bmad" / "memory" / SKILL_NAME
 
 
+def archive_root() -> Path | None:
+    """The cold archive, if the owner has set one up.
+
+    The sanctum is bounded on purpose: it loads on every waking, so every token in
+    it costs context that the actual conversation could have used. That bound is
+    what forces curation, and curation is what has historically destroyed history,
+    because an aged session log had nowhere to go except deletion.
+
+    An archive is any directory of markdown outside the sanctum with no token
+    budget and no retention limit. It is optional. When it is absent the agent
+    behaves exactly as before, and `curate.py` says plainly that aged logs have no
+    destination, so the choice to delete stays deliberate rather than implied.
+
+    $LOCAL_AGENT_ARCHIVE overrides. The default sits beside the sanctum rather
+    than inside it, because anything inside would be loaded, counted and curated
+    like identity, which is the opposite of what an archive is for.
+    """
+    override = os.environ.get("LOCAL_AGENT_ARCHIVE")
+    root = Path(override) if override else sanctum_home() / "archive"
+    root = root.expanduser().resolve()
+    return root if root.is_dir() else None
+
+
+def archive_target(filename: str, root: Path) -> str | None:
+    """Where an aged log lands in the archive, from the date in its filename.
+
+    Uses the same date-in-filename rule `stale_logs` uses to decide a log is aged,
+    so the aged list and the archive location can never disagree about which month
+    a log belongs to. A filename carrying no date has no derivable target; that is
+    reported rather than guessed at.
+    """
+    m = DATE_IN_NAME.search(filename)
+    if not m:
+        return None
+    return str(root / "log" / m.group(1) / m.group(2) / filename)
+
+
 def prose_of(entry: str) -> str:
     """An index entry minus its backticked pointers.
 

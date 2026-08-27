@@ -196,6 +196,26 @@ project where the agent was invoked. The default is `~/local-agent`;
 `LOCAL_AGENT_HOME` overrides it. This prevents a second identity from being
 created when you invoke the agent from another project.
 
+### The archive tier, optional
+
+`MEMORY.md` loads on every waking, so it is deliberately bounded, and that bound
+is what forces curation. Without somewhere to put them, curation deletes aged
+session logs after fourteen days, and the record of what happened goes with them.
+
+An archive is any directory of markdown outside the sanctum. It is never loaded
+on waking, so it costs no context and has no size limit.
+
+```bash
+mkdir -p ~/local-agent/archive        # or: export LOCAL_AGENT_ARCHIVE=~/notes/archive
+```
+
+`curate.py` then reports each aged log with the path it archives to, instead of a
+bare age that reads as an instruction to delete. `references/archive.md` is the
+procedure and owns the redaction gate on what may leave the sanctum;
+`scripts/verify_archive_redaction.py` makes that gate checkable rather than
+asserted. Full rationale, and what an Obsidian vault adds if you use one, in
+[`docs/archive-tier.md`](docs/archive-tier.md).
+
 ## Lifecycle
 
 - No memory store: `FIRST_BREATH` starts initialization.

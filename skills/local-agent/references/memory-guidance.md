@@ -64,8 +64,10 @@ remember}
 ### MEMORY.md (curated, distilled)
 
 Your long-term memory, loaded on every waking. Periodically, review recent
-session logs and distill the insights worth keeping into MEMORY.md, then prune
-the aged session logs whose value has been extracted. Keep it tight, relevant,
+session logs and distill the insights worth keeping into MEMORY.md, then archive
+the aged session logs to the archive tier and prune them from the sanctum once
+that archive is verified. `references/archive.md` owns that path and the
+redaction gate on it. Keep it tight, relevant,
 and current.
 
 Do the measuring with a script rather than by eye, since you cannot reliably
@@ -74,7 +76,7 @@ count your own tokens or the age of a log. Run
 count, the session logs now older than 14 days, and any drift between INDEX.md
 and what is actually in your sanctum. Reason over its numbers. The judgment
 stays yours: what to distill, merge, prune, or delete, and which aged logs to
-remove.
+archive and then remove.
 
 ## Where to Write
 
