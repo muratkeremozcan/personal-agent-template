@@ -62,6 +62,10 @@ from _sanctum import (  # noqa: E402
     prose_of,
     sanctum_home,
     stale_logs,
+    archive_root,
+    undated_logs,
+    ArchiveMisconfigured,
+    archive_target,
 )
 
 # The always-present skeleton: structural, not organic, so not index-drift candidates.
@@ -176,7 +180,55 @@ def stale_session_logs(sanctum: Path, days: int, today: date) -> dict:
     sessions = sanctum / "sessions"
     logs = sorted(p.name for p in sessions.glob("*.md")) if sessions.is_dir() else []
     stale = stale_logs(sanctum, days, today)
-    return {"total": len(logs), "stale": stale, "days_threshold": days}
+    try:
+        root = archive_root()
+    except ArchiveMisconfigured as exc:
+        return {
+            "total": len(logs), "stale": stale, "days_threshold": days,
+            "disposition": "misconfigured",
+            "error": str(exc),
+            "note": (
+                "LOCAL_AGENT_ARCHIVE is set and wins over the default, so creating the "
+                "default path will not help. Correct the variable to an existing "
+                "directory outside the sanctum, or unset it to run with no archive. "
+                "Prune nothing until then."
+            ),
+        }
+    out = {"total": len(logs), "stale": stale, "days_threshold": days}
+    if root is None:
+        # No archive configured. Say so rather than reporting a bare age, because an
+        # aged log with no stated destination reads as an instruction to delete, and
+        # deletion is how five years of record quietly disappears.
+        undated = undated_logs(sanctum)
+        if undated:
+            out["undated"] = undated
+        out["disposition"] = "no archive configured"
+        out["note"] = (
+            "Aged logs have nowhere to go. Set LOCAL_AGENT_ARCHIVE, or create "
+            f"{sanctum_home() / 'archive'}, to archive instead of deleting. "
+            "See references/archive.md."
+        )
+        return out
+    undated = undated_logs(sanctum)
+    if undated:
+        # These never age, so they never reach this list, so they would sit in the
+        # sanctum forever while `total` counted them. Naming them is what keeps
+        # "every log eventually archives" from being quietly false.
+        out["undated"] = undated
+        out["undated_note"] = (
+            "These logs carry no parseable date in their filename, so they never become "
+            "stale and never archive. Rename them to YYYY-MM-DD-topic.md, or exempt them "
+            "deliberately."
+        )
+    out["disposition"] = "archive"
+    out["archive_root"] = str(root)
+    out["destination"] = [
+        {"log": name, "archives_to": archive_target(name, root) or "unknown: no date in filename"}
+        for name in stale
+    ]
+    out["procedure"] = "references/archive.md"
+    out["gate"] = "scripts/verify_archive_redaction.py"
+    return out
 
 
 def index_drift(sanctum: Path) -> dict:

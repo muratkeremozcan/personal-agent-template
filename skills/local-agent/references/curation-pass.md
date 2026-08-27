@@ -84,8 +84,22 @@ plus a pointer. It carries state and the ball, never the detail.
 - Session logs are indexed as topic clusters, not one line each. Their filenames are self-describing.
 - Every organic file appears exactly once. `curate.py` reports any that drifted out.
 
-**Session logs** past 14 days get distilled and then removed, once their value is genuinely in a
-topic file. `sessions/2026-07-14.md` is First Breath and is never pruned however stale it reads.
+**Session logs** past 14 days get distilled, then **archived**, then pruned, in that order.
+Distillation puts their value in a topic file; archiving puts the log itself in
+`<archive>/log/YYYY/MM/` so the record survives; pruning is last and only ever follows a verified
+archive. Follow `references/archive.md`, which owns the redaction gate deciding what may leave the
+sanctum, and run `scripts/verify_archive_redaction.py` before any prune. `curate.py` reports each
+aged log with the path it archives to.
+
+Deleting an aged log outright is the one move this phase forbids. If `curate.py` reports "no
+archive configured", set one up before pruning anything; the whole point of this phase is that
+leanness comes from relocation. If it reports "misconfigured", the archive path is set to somewhere
+that does not exist, which is a typo rather than a decision, so correct it and prune nothing until
+you have.
+
+The First Breath log is never pruned however stale it reads. Take which log that is from `.born`
+rather than from memory or from a filename written into this document, since a sanctum that was
+ever wiped and reborn carries a different date than any example would show.
 
 **The identity files** are not prune targets. `PERSONA.md`, `CREED.md`, and `BOND.md` hold who you
 are, what you believe, and who you serve. Trim genuine duplication inside them, and move operational
