@@ -107,6 +107,16 @@ def archive_root() -> Path | None:
     root = Path(override) if override else sanctum_home() / "archive"
     root = root.expanduser().resolve()
     if root.is_dir():
+        sanctum = sanctum_path()
+        if root == sanctum or sanctum in root.parents or root in sanctum.parents:
+            # An archive inside the sanctum defeats the entire purpose: it would be
+            # loaded on waking, counted against the token budget, and curated like
+            # identity. An archive that *contains* the sanctum is worse, because
+            # pruning inside it could reach the identity files.
+            raise ArchiveMisconfigured(
+                f"archive at {root} overlaps the sanctum at {sanctum}. "
+                "An archive must sit outside it, or it gets loaded and curated like identity."
+            )
         return root
     if override:
         # An explicit setting pointing nowhere is a misconfiguration, and it must never
@@ -127,10 +137,10 @@ def archive_target(filename: str, root: Path) -> str | None:
     a log belongs to. A filename carrying no date has no derivable target; that is
     reported rather than guessed at.
     """
-    m = DATE_IN_NAME.search(filename)
-    if not m:
+    d = log_date_of(filename)
+    if d is None:
         return None
-    return str(root / "log" / m.group(1) / m.group(2) / filename)
+    return str(root / "log" / f"{d.year:04d}" / f"{d.month:02d}" / Path(filename).name)
 
 
 def prose_of(entry: str) -> str:
@@ -158,6 +168,43 @@ def birth_date(sanctum: Path) -> date | None:
         return None
 
 
+def log_date_of(filename: str) -> date | None:
+    """The date a session log's *basename* declares, or None.
+
+    One parser, used by both `stale_logs` and `archive_target`, because a review found
+    them disagreeing in two ways that both ended with a log filed somewhere its own
+    staleness rule never looked. `archive_target` searched the whole path, so
+    `sessions/2020-07-08/no-date.md` got a destination under 2020/07 while the
+    non-recursive stale scan ignored it entirely. And it never validated the match, so
+    `2026-99-99-...md` produced `/log/2026/99/` while `stale_logs` rejected the same
+    string as an impossible date.
+
+    Taking `Path(filename).name` is what rejects directory components; constructing a
+    `date` is what rejects month 99.
+    """
+    m = DATE_IN_NAME.search(Path(filename).name)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def undated_logs(sanctum: Path) -> list[str]:
+    """Session logs carrying no parseable date in their filename.
+
+    These are invisible to every other rule here: they never age, so they are never
+    reported stale, so they never reach an archive, so they sit in the sanctum forever
+    while `total` counts them. Reporting them by name is what keeps "every log
+    eventually reaches the archive" from being quietly false.
+    """
+    sessions = sanctum / "sessions"
+    if not sessions.is_dir():
+        return []
+    return sorted(p.name for p in sessions.glob("*.md") if log_date_of(p.name) is None)
+
+
 def stale_logs(sanctum: Path, days: int, today: date) -> list[str]:
     """Session logs whose filename date is older than the retention threshold.
 
@@ -172,14 +219,10 @@ def stale_logs(sanctum: Path, days: int, today: date) -> list[str]:
     born = birth_date(sanctum)
     out = []
     for path in sorted(sessions.glob("*.md")):
-        m = DATE_IN_NAME.search(path.name)
-        if born and m and m.group(0) == born.isoformat():
+        log_date = log_date_of(path.name)
+        if log_date is None:
             continue
-        if not m:
-            continue
-        try:
-            log_date = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        except ValueError:
+        if born and log_date == born:
             continue
         if (today - log_date).days > days:
             out.append(path.name)

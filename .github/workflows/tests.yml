@@ -1,0 +1,41 @@
+name: tests
+
+# The scripts here decide what leaves an agent's private memory for a durable, often
+# synced store. A regression in that gate is not visible by reading a diff, so the suite
+# runs on every push and every pull request rather than on a schedule.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor is what `requires-python` in the scripts declares. The ceiling
+        # catches a deprecation before it reaches anyone building on the template.
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run the suite
+        # Standard library only, so there is nothing to install. If that ever stops
+        # being true this step fails loudly rather than silently skipping.
+        run: python -m unittest discover -s skills/local-agent/scripts/tests -v
+
+      - name: Check the scripts are syntactically valid on this version
+        run: python -m compileall -q skills/local-agent/scripts

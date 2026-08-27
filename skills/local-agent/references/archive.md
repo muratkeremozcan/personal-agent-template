@@ -135,7 +135,7 @@ names appearing in the log itself. Either way the shape is the same:
 
 A name that is absent from the taxonomy stays in the prose and out of the frontmatter. An unresolved
 `[[person/Someone]]` puts a person on the graph that the archive cannot explain, which is a disclosure.
-Jira keys are the deliberate exception the integration plan already made: they stay unresolved on
+Issue-tracker keys are the deliberate exception: they stay unresolved on
 purpose and cost no files.
 
 Compute all three lists from the redacted text, after the gate has run. A person named only inside a
@@ -214,7 +214,7 @@ these tokens, matched case-insensitively:
 
 **This list is illustrative and never exhaustive.** Any phrasing that implies the writer expected the
 material to stay put counts as a marker, whether or not its words appear above. "A colleague said this
-stays between us: the Budapest office may close" carries no token from an earlier version of this
+stays between us: the second office may close" carries no token from an earlier version of this
 list, names no individual against a personnel topic, and is no credential. It is still marked. When a
 line reads as something someone asked to be kept quiet, treat it as marked and move to fail closed.
 
@@ -259,7 +259,7 @@ lines. These are examples of a shape rather than a lookup table; match the inten
   ```markdown
   **Confidential:**
 
-  The Budapest office lease will not be renewed.
+  The second office lease will not be renewed.
   ```
 
   The paragraph holding the marker contains only the label, so withholding that paragraph withholds
@@ -314,7 +314,7 @@ see that something is missing will conclude the record is complete.
 > `sessions/redacted/2026-05-04-example-topic.md`.
 ```
 
-Set `redacted: true` and `redacted_count: N` in the frontmatter so a Dataview query can list every
+Set `redacted: true` and `redacted_count: N` in the frontmatter so a query or a grep can list every
 archived note carrying an omission without opening any of them.
 
 The category comes from this closed vocabulary, and the notice carries the category and nothing
@@ -330,6 +330,29 @@ Never name the person and never restate the specific detail. "1 block withheld: 
 legible. A notice naming the person and the event, in the shape "1 block withheld: [Person C]'s
 departure", reproduces the secret inside the notice that was supposed to protect it, and does it in
 the copy that syncs off the machine.
+
+### What the automated gate cannot do
+
+The gate matches text. It catches a withheld sentence reproduced, a long word run that
+survived light rewording, a credential-shaped value, and an entity name reaching the filename
+or the frontmatter. It does **not** understand meaning.
+
+A review demonstrated the gap by archiving "Leadership plans Friday cancellation for
+Nightingale; Jordan employment will end" against withheld text saying Nightingale would be
+cancelled on Friday and Jordan dismissed. Every fact survived, no phrase did, and the gate
+passed it.
+
+Nothing in a text comparison closes that, so it is a standing limitation rather than a bug
+awaiting a fix. Two consequences, both binding:
+
+- **The gate is a floor, never a clearance.** A pass means no textual leak was found. It is
+  not a statement that the archived note is safe to publish.
+- **Rewriting a withheld block in your own words is a redaction failure**, however different
+  the wording. The rule is to withhold the block, not to paraphrase it. When a summary of a
+  withheld topic seems necessary, it goes in the notice as a category and nothing more.
+
+Where semantic equivalence is uncertain, fail closed and ask the owner. That is the branch
+below, and this is the case it exists for.
 
 ### 4. Fail closed
 

@@ -39,13 +39,24 @@ MIN_SENTENCE_CHARS = 24
 # Deliberately short: the cost of a false positive is a human reading one line, and the cost
 # of a false negative is a secret in a synced repository that cannot be recalled.
 STOPWORDS = frozenset("""
-about after again against because been before being between both came come could does
-doing done down during each else even ever every from further had has have having here
-hers herself him himself his how into itself just like made make many more most much must
-never next only other others ought our ours ourselves out over own same she should since
-some such than that thats their theirs them themselves then there these they this those
-through time under until very was were what when where which while who whom why will with
-would your yours yourself yourselves
+a an the and or but nor for so yet if then than that this these those there here
+i me my we us our you your he him his she her it its they them their who whom whose
+what which when where why how all any both each few more most other some such
+no not only own same too very can will just don should now
+is am are was were be been being have has had having do does did doing
+of in on at by to from up down out off over under again further once
+about above across after against along among around because before behind below
+beneath beside between beyond during except inside into like near since through
+throughout toward towards until upon with within without
+as also however therefore thus while whereas although though even still yet
+one two three four five six seven eight nine ten first second third next last
+said says say told tell asked ask made make made makes going go goes went
+get got gets getting put puts take takes taken taking come comes came
+would could should might must shall may
+note notes noted meeting meetings call calls team teams work works working
+project projects update updates change changes changed thing things
+time times day days week weeks month months year years today tomorrow yesterday
+end ends ended start starts started keep keeps kept
 """.split())
 
 # Frontmatter keys whose values are structural rather than content. Their words are not
@@ -63,7 +74,19 @@ SHINGLE_WORDS = 7
 
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n{2,}")
-WORD = re.compile(r"[a-z0-9][a-z0-9']*")
+WORD = re.compile(r"[^\W_][^\W_']*", re.UNICODE)
+
+# Values shaped like a secret are compared verbatim with no length threshold at all.
+# A review archived `PIN: 1234` past both the sentence floor and the word-run check,
+# because it is neither long prose nor seven words. Length is the wrong axis for these.
+CREDENTIAL_SHAPED = re.compile(
+    r"""(?xi)
+    (?: (?:pin|otp|code|token|key|secret|password|passcode|ssn|account|acct|iban|salary|
+           severance|comp|bonus|offer|amount|rate) \s* [:=]\s* \S+ )
+    | \b\d{3,}(?:[.,]\d+)?\b
+    | \b[A-Za-z0-9_-]{16,}\b
+    """
+)
 
 # The redacted file carries its own provenance header naming the source log. That header is
 # not withheld material, so comparing a slug against it makes every archive fail on its own
@@ -73,7 +96,7 @@ PROVENANCE = re.compile(r"^\s*#{1,6}\s*withheld from .*$", re.I | re.M)
 # Slugs and paths are hyphen-joined identifiers. Tokenizing them as prose yields one long
 # token that matches nothing, which is how a filename naming the redacted subject slipped
 # through the first version of this check.
-IDENT_SPLIT = re.compile(r"[^a-z0-9]+")
+IDENT_SPLIT = re.compile(r"[\W_]+", re.UNICODE)
 
 
 def normalize(text: str) -> str:
@@ -103,6 +126,57 @@ def sentences(text: str) -> list[str]:
     return out
 
 
+# A notice a reader sees when the markdown is rendered. Callout or heading form.
+VISIBLE_NOTICE = re.compile(r"withheld\s+from\s+archive", re.I)
+
+# Constructs that render as nothing. A notice hidden in one of these is not a notice.
+HIDDEN = re.compile(r"<!--.*?-->|```.*?```|~~~.*?~~~", re.S)
+
+# Provenance keys, in any YAML spelling: bare, quoted, block scalar.
+PROVENANCE_KEY = re.compile(
+    r"""^\s*['"]?(source|source_path|origin)['"]?\s*:\s*(?P<v>.*)$""", re.I
+)
+
+
+def strip_hidden(text: str) -> str:
+    """Body with HTML comments and fenced code removed.
+
+    A review satisfied the visible-notice check with `<!-- Withheld from archive -->`,
+    which renders as nothing at all. A notice that no reader sees is the silent hole the
+    rule exists to prevent, so hidden constructs are removed before looking for it.
+    """
+    return HIDDEN.sub(" ", text)
+
+
+def provenance_values(frontmatter: str) -> list[str]:
+    """Every provenance value, including block scalars and quoted keys.
+
+    A line-prefix check misses `source: >-` with the value on following lines, and
+    misses a `"source"` key. Both are valid YAML and a review carried a redaction
+    subject through each. Parsing without a YAML dependency means handling the shapes
+    explicitly: scalar on the same line, or an indented block after `|`/`>`.
+    """
+    out: list[str] = []
+    lines = frontmatter.splitlines()
+    i = 0
+    while i < len(lines):
+        m = PROVENANCE_KEY.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        value = m.group("v").strip()
+        if value.startswith(("|", ">")):
+            block, i = [], i + 1
+            while i < len(lines) and (not lines[i].strip() or lines[i][:1].isspace()):
+                block.append(lines[i].strip())
+                i += 1
+            out.append(" ".join(b for b in block if b))
+            continue
+        out.append(value.strip("\"'"))
+        i += 1
+    return out
+
+
 def read(path: Path, label: str) -> str:
     if not path.is_file():
         sys.stderr.write(f"cannot run: {label} does not exist at {path}\n")
@@ -129,7 +203,12 @@ def main() -> int:
     parser.add_argument(
         "redacted_file",
         type=Path,
-        help="the sessions/redacted/ file holding the withheld blocks",
+        nargs="?",
+        help="the sessions/redacted/ file holding the withheld blocks; omit with --no-withheld",
+    )
+    parser.add_argument(
+        "--no-withheld", action="store_true",
+        help="verify a log from which nothing was withheld; the note must say `redacted: false`",
     )
     parser.add_argument(
         "--shingle",
@@ -149,6 +228,44 @@ def main() -> int:
         return 2
 
     vault_raw = read(args.archived_note, "archived note")
+
+    # A log with nothing withheld has no redacted file, so the mandatory verification
+    # step could not run at all and was in practice skipped. A skipped step is exactly
+    # the escape a missed redaction needs, so the clean case gets its own assertion
+    # rather than an exemption: the note must actively claim nothing was withheld.
+    if args.no_withheld:
+        if args.redacted_file is not None and Path(args.redacted_file).exists():
+            sys.stderr.write(
+                f"cannot run: --no-withheld passed but {args.redacted_file} exists. "
+                "Either material was withheld or it was not.\n"
+            )
+            return 2
+        fm, body = frontmatter_and_body(vault_raw)
+        problems = []
+        if re.search(r"^redacted:\s*true\b", fm, re.M | re.I):
+            problems.append("frontmatter says `redacted: true` but no redacted file was given")
+        if re.search(r"^redacted_count:\s*[1-9]", fm, re.M):
+            problems.append("frontmatter declares a nonzero `redacted_count`")
+        if VISIBLE_NOTICE.search(strip_hidden(body)):
+            problems.append("the body carries a withheld notice")
+        if not re.search(r"^redacted:\s*false\b", fm, re.M | re.I):
+            problems.append("frontmatter must state `redacted: false` so the clean claim is explicit")
+        if problems:
+            sys.stderr.write(f"FAIL: clean-archive claim is inconsistent in {args.archived_note}\n")
+            for problem in problems:
+                sys.stderr.write(f"  - {problem}\n")
+            sys.stderr.write("\nRoll back the archive. Do not prune the source log.\n")
+            return 1
+        if not args.quiet:
+            print(f"OK  {args.archived_note}\n    verified clean: nothing withheld, and the note says so")
+        return 0
+
+    if args.redacted_file is None:
+        sys.stderr.write(
+            "cannot run: no redacted file given. Pass one, or pass --no-withheld to "
+            "verify a log from which nothing was withheld.\n"
+        )
+        return 2
     withheld_raw = read(args.redacted_file, "redacted file")
 
     if not withheld_raw.strip():
@@ -181,21 +298,13 @@ def main() -> int:
 
     # 3. Token sweep over the WHOLE archived note.
     #
-    # The earlier version checked only the filename and the `source:` line, which left two
-    # holes a review found by constructing them. A withheld sentence under the length floor
-    # ("PersonC was fired.") survived the sentence check and was short enough to produce no
-    # matching word run. And an entity named only inside a withheld block could be written
-    # into `people:` frontmatter, which is precisely the leak this capability's own
-    # documentation calls the subtlest it can produce: the body shows nothing while the
-    # frontmatter advertises who the withheld block was about.
-    #
-    # So every distinctive token from the withheld text is now looked for everywhere in the
-    # archived note: body, all frontmatter, and any generated link block.
-    #
-    # This will occasionally flag a word that legitimately appears on both sides. That is the
-    # intended bias. A false positive costs a person one line of reading; a false negative is
-    # a secret in a synced repository that cannot be recalled. `--allow` exists for the
-    # genuine collisions.
+    # Reviews closed several holes here by construction, and each one is a test now.
+    # A withheld sentence under the length floor ("PersonC was fired.") survived both
+    # the sentence check and the word-run check. An entity named only inside a
+    # withheld block could be written into `people:` frontmatter, the leak this
+    # capability's own documentation calls the subtlest it can produce. And a
+    # credential-shaped value like `PIN: 1234` is neither long prose nor seven words,
+    # so length was never the right axis for it.
     withheld_body = PROVENANCE.sub(" ", withheld_raw)
     allowed = {a.lower() for a in args.allow}
 
@@ -207,19 +316,56 @@ def main() -> int:
             if t.isdigit():
                 if len(t) >= MIN_DIGIT_TOKEN:
                     out.add(t)
-            elif len(t) > 3:
+            elif len(t) >= 2:
                 out.add(t)
         return out
 
-    withheld_idents = distinctive(withheld_body)
+    def entity_candidates(text: str) -> set[str]:
+        """Tokens that look like a named subject rather than ordinary vocabulary.
 
-    # Structural frontmatter is excluded so `type: session-log` and a `date:` shared with the
-    # withheld block's own heading do not read as leaks.
+        Used only for the filename and provenance checks. A review made a clean
+        `2026-05-04-team-update.md` fail because withheld prose contained the word
+        "team", while `amy-departure` passed because "amy" was under a length floor.
+        Length was the wrong discriminator in both directions.
+
+        Capitalisation is the better one for a slug check: a redaction subject is a
+        proper noun in the withheld prose, and ordinary vocabulary is not. Tokens with
+        no case system, which covers every non-Latin script, always qualify, because
+        case cannot be used to rule them out.
+        """
+        out = set()
+        for raw in re.findall(r"[^\W_][^\W_']*", PROVENANCE.sub(" ", text), re.UNICODE):
+            low = raw.lower()
+            if low in STOPWORDS or low in allowed:
+                continue
+            caseless = raw.lower() == raw.upper()
+            if raw[:1].isupper() or caseless or CREDENTIAL_SHAPED.fullmatch(raw):
+                if len(raw) >= 2 or caseless:
+                    out.add(low)
+        for m in CREDENTIAL_SHAPED.finditer(text):
+            v = m.group(0).strip().lower()
+            if v and v not in allowed:
+                out.add(v)
+        return out
+
+    withheld_idents = distinctive(withheld_body)
+    withheld_entities = entity_candidates(withheld_body)
+
+    # Credential-shaped values are compared verbatim with no threshold of any kind.
+    for m in CREDENTIAL_SHAPED.finditer(withheld_body):
+        needle = normalize(m.group(0))
+        if len(needle) >= 3 and needle in vault_norm and needle not in allowed:
+            failures.append(
+                f"credential-shaped value from the withheld text appears verbatim: {needle!r}"
+            )
+
+    # Structural frontmatter is excluded so `type: session-log` and a shared `date:`
+    # do not read as leaks.
     content_fm = "\n".join(
         line for line in vault_fm.splitlines()
-        if not any(line.startswith(k + ":") for k in STRUCTURAL_KEYS)
+        if not any(line.lstrip('"\' ').startswith(k) and ":" in line for k in STRUCTURAL_KEYS)
     )
-    searchable = f"{args.archived_note.stem}\n{content_fm}\n{vault_body}"
+    searchable = f"{content_fm}\n{vault_body}"
 
     leaked_tokens = sorted(distinctive(searchable) & withheld_idents)
     if leaked_tokens:
@@ -229,33 +375,50 @@ def main() -> int:
             "unrelated to what was withheld."
         )
 
-    # The filename and `source:` get named separately, because the fix differs: they are
-    # copies of the sanctum filename rather than authored content, so the remedy is a
-    # re-slug and `source_withheld: true` rather than an edit.
-    slug_hits = sorted(distinctive(args.archived_note.stem) & withheld_idents)
+    # The filename and provenance are copies of the sanctum filename rather than
+    # authored prose, so they compare against entity candidates and the fix differs:
+    # a re-slug, not an edit.
+    # Capitalisation identifies an entity in the withheld PROSE. A slug is lowercase by
+    # construction, so the same test on that side rules out every real hit; the slug is
+    # tokenised plainly and intersected with the entities found in the prose.
+    slug_hits = sorted(distinctive(args.archived_note.stem) & withheld_entities)
+
+    # A slug can name a subject without tokenising to it. `personc-leaving` splits to
+    # "personc", which matches neither "person" nor "c", so a review carried a subject
+    # through by concatenation. Compare the separator-stripped slug against each
+    # withheld entity as a substring too. Four characters is the floor because shorter
+    # entities collide with ordinary syllables.
+    slug_joined = "".join(IDENT_SPLIT.split(normalize(args.archived_note.stem)))
+    slug_hits += [
+        e for e in sorted(withheld_entities)
+        if len(e) >= 4 and e in slug_joined and e not in slug_hits
+    ]
     if slug_hits:
         failures.append(
-            f"archived note filename shares distinctive tokens with withheld text: {slug_hits}. "
+            f"archived note filename names a withheld subject: {slug_hits}. "
             "Re-slug from redacted content and set source_withheld: true."
         )
 
-    for line in vault_fm.splitlines():
-        if line.startswith(("source:", "source_path:")):
-            src_hits = sorted(
-                distinctive(line) & withheld_idents - {"sessions", "redacted", "source", "path"}
+    # Provenance is read from parsed YAML rather than by line prefix. A review carried a
+    # subject through `source: >-` and through a quoted `"source"` key, both valid YAML
+    # that a startswith() check never sees.
+    for value in provenance_values(vault_fm):
+        hits = sorted(
+            distinctive(value) & withheld_entities - {"sessions", "redacted"}
+        )
+        if hits:
+            failures.append(
+                f"provenance field names a withheld subject: {hits} in {value!r}. "
+                "Omit source and set source_withheld: true."
             )
-            if src_hits:
-                failures.append(
-                    f"`{line.strip()}` shares distinctive tokens with withheld text: "
-                    f"{src_hits}. Omit source and set source_withheld: true."
-                )
 
-    # 4. A withheld block must leave a visible notice. A silent hole reads as a complete
-    #    record, which is the failure mode the trace rule exists to prevent.
-    if "withheld from archive" not in vault_norm:
+    # 4. A withheld block must leave a notice a reader can actually see. A review
+    # satisfied the old substring search with an HTML comment, which renders as nothing.
+    if not VISIBLE_NOTICE.search(strip_hidden(vault_body)):
         failures.append(
-            "withheld material exists but the archived note carries no 'Withheld from archive' "
-            "notice. A silent omission reads as a complete record."
+            "withheld material exists but the archived note carries no reader-visible "
+            "'Withheld from archive' notice outside comments and code. A silent omission "
+            "reads as a complete record."
         )
 
     if failures:

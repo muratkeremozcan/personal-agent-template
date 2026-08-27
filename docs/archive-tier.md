@@ -19,7 +19,7 @@ is the tier the memory system was missing:
 
 | tier | loaded on waking | bounded | holds |
 |---|---|---|---|
-| `MEMORY.md` | yes | ~2500 tokens | what would make the agent wrong without it |
+| `MEMORY.md` | yes | `MEMORY_GUARDRAIL_TOKENS` in `_sanctum.py`, 1500 as shipped | what would make the agent wrong without it |
 | session logs | no | 14 days | raw notes awaiting distillation |
 | **archive** | **no** | **unbounded** | **every log, permanently** |
 
@@ -39,15 +39,23 @@ instruction to delete.
 
 ```json
 "session_logs": {
+  "total": 12,
   "stale": ["2026-05-04-topic.md"],
+  "days_threshold": 14,
   "disposition": "archive",
+  "archive_root": "/Users/you/local-agent/archive",
   "destination": [
-    {"log": "2026-05-04-topic.md", "archives_to": "/Users/you/local-agent/archive/log/2026/05/2026-05-04-topic.md"}
+    {"log": "2026-05-04-topic.md",
+     "archives_to": "/Users/you/local-agent/archive/log/2026/05/2026-05-04-topic.md"}
   ],
   "procedure": "references/archive.md",
   "gate": "scripts/verify_archive_redaction.py"
 }
 ```
+
+An `undated` list joins those keys when any session log carries no parseable date in its
+filename. Those logs never age, so they never appear in `stale` and never reach an archive;
+naming them is what keeps "every log eventually archives" from being quietly false.
 
 Then read `references/archive.md` once, in full, before the first archive. It owns the
 redaction gate.
@@ -78,14 +86,18 @@ Three rules that are easy to get wrong and were, in a real deployment:
   three verbatim copies of the sanctum filename. A log named for its subject leaks it three
   times over while the body shows nothing.
 
-## Entity notes: the part that changes what the agent can recall
+## Entity notes: the pattern worth building on top
 
-This is the highest-value half of the archive tier and it is easy to mistake for decoration.
+**This template ships no entity generator.** What counts as a person, a theme or a repository
+is deployment-specific, so the tier provides the destination and the procedure and leaves the
+generator to you. The pattern is documented here because it is the highest-value thing to
+build on the archive, and it is easy to mistake for decoration.
 
 Archived logs carry `people:`, `themes:` and `repos:` frontmatter. Generate one small note per
 entity, whose body is the list of every log referencing it, and each of those notes becomes a
-**precomputed retrieval index**. It is worth being concrete about the difference. In one real
-deployment, answering "when did contract testing happen, and where" cost:
+**precomputed retrieval index**. It is worth being concrete about the difference. In one deployment that built such a
+generator over a five-year archive, answering "when did contract testing happen, and where"
+cost:
 
 | | files opened | tokens read | reliability |
 |---|---|---|---|
@@ -93,8 +105,9 @@ deployment, answering "when did contract testing happen, and where" cost:
 | open `theme/contract-testing.md` | 1 | ~227 | complete by construction |
 
 **281 times less context, and correct rather than hopeful.** The index answered with a
-five-year arc, December 2021 through August 2026, because it was built when the notes were
-written rather than guessed at read time.
+five-year arc because it was built when the notes were written rather than guessed at read
+time. Those figures come from one archive of 99 notes; the ratio in yours depends on its size
+and shape, and the point is the order of magnitude rather than the exact number.
 
 That is the argument for entity notes. An agent's recall is bounded by what it can afford to
 read, so an index that collapses a full-text sweep into one file is not a convenience; it
@@ -111,9 +124,11 @@ Nothing above needs Obsidian. An archive is markdown in folders, the entity note
 too, and any editor reads all of it. What Obsidian adds is threefold, in descending order of
 value to the agent:
 
-- **Backlinks maintained for free.** Obsidian resolves `[[wikilinks]]` continuously, so the
-  entity indexes stay correct as an editor moves and renames things. Hand-maintained indexes
-  rot; these do not.
+- **Backlinks maintained for free.** Obsidian resolves `[[wikilinks]]` in note bodies
+  continuously, so entity indexes stay correct as an editor moves and renames things.
+  Hand-maintained indexes rot; these do not. Note that whether links written inside YAML
+  frontmatter also produce graph edges is version and settings dependent, and was not verified
+  for this document. Put entity links in the note body if you need the edge guaranteed.
 - **Unresolved links are free nodes.** A link to `[[TICKET-123]]` resolves as a graph node
   whether or not a file by that name exists. Hundreds of tickets and repositories become
   navigable at no cost in files, and writing a stub for each saying "mentioned once" would be

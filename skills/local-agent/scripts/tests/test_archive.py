@@ -65,6 +65,35 @@ class ArchiveRootTest(unittest.TestCase):
         # and stops being findable by the only index anyone uses, which is the date.
         self.assertIsNone(_sanctum.archive_target("no-date.md", Path("/a")))
 
+    def test_archive_inside_the_sanctum_is_rejected(self):
+        # An archive inside the sanctum gets loaded on waking, counted against the token
+        # budget, and curated like identity, which is the opposite of an archive.
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["LOCAL_AGENT_HOME"] = tmp
+            sanctum = _sanctum.sanctum_path()
+            (sanctum / "sessions").mkdir(parents=True)
+            os.environ["LOCAL_AGENT_ARCHIVE"] = str(sanctum / "sessions")
+            with self.assertRaises(_sanctum.ArchiveMisconfigured):
+                _sanctum.archive_root()
+
+    def test_target_rejects_a_date_in_a_directory_component(self):
+        # stale_logs globs non-recursively and reads path.name, so a date in a parent
+        # directory must not produce a destination the staleness rule never saw.
+        self.assertIsNone(
+            _sanctum.archive_target("sessions/2020-07-08/no-date.md", Path("/a")))
+
+    def test_target_rejects_an_impossible_date(self):
+        # stale_logs rejects month 99; the destination derivation has to agree.
+        self.assertIsNone(_sanctum.archive_target("2026-99-99-topic.md", Path("/a")))
+
+    def test_undated_logs_are_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sanctum = Path(tmp)
+            (sanctum / "sessions").mkdir()
+            (sanctum / "sessions" / "no-date.md").write_text("x")
+            (sanctum / "sessions" / "2026-05-04-topic.md").write_text("x")
+            self.assertEqual(_sanctum.undated_logs(sanctum), ["no-date.md"])
+
     def test_target_month_matches_the_staleness_rule(self):
         # Both read the date from the filename. If these ever diverge, a log can be
         # called stale for one month and archived into another.
@@ -150,9 +179,9 @@ class RedactionGateTest(unittest.TestCase):
         # it can produce: the body shows nothing while the frontmatter announces who the
         # withheld block was about. Only `source:` used to be checked.
         withheld = ("## Withheld from 2026-05-04-topic.md\n\n"
-                    "**Confidential:** Zsuzsanna is being managed out after a review.\n")
+                    "**Confidential:** PersonD is being managed out after a review.\n")
         note = self.CLEAN.replace("redacted: true",
-                                  'people: ["[[person/Zsuzsanna]]"]\nredacted: true')
+                                  'people: ["[[person/PersonD]]"]\nredacted: true')
         self.assertEqual(self._run(note, withheld), 1)
 
     def test_allow_permits_a_genuine_collision(self):
@@ -170,6 +199,76 @@ class RedactionGateTest(unittest.TestCase):
                 capture_output=True, text=True,
             ).returncode
         self.assertEqual(rc, 0)
+
+    def test_credential_shaped_value_is_caught_regardless_of_length(self):
+        # Regression: `PIN: 1234` is neither long prose nor seven words, so both
+        # thresholds missed it. Length was never the right axis for a secret.
+        withheld = "## Withheld from 2026-05-04-topic.md\n\n**Confidential:** Access PIN: 1234.\n"
+        leaked = self.CLEAN.replace("Ordinary content.", "Ordinary content. PIN: 1234")
+        self.assertEqual(self._run(leaked, withheld), 1)
+
+    def test_short_name_in_slug_is_caught(self):
+        # Regression: a four-character floor dropped short given names, which are
+        # exactly what a personnel redaction is about.
+        withheld = "## Withheld from x.md\n\n**Confidential:** Amy is departing next month.\n"
+        self.assertEqual(self._run(self.CLEAN, withheld, name="2026-05-04-amy-departure.md"), 1)
+
+    def test_concatenated_slug_is_caught(self):
+        # Regression: `personc-leaving` tokenises to "personc", matching neither
+        # "person" nor "c", so a subject travelled through by concatenation.
+        withheld = "## Withheld from x.md\n\n**Confidential:** Person C is leaving.\n"
+        self.assertEqual(self._run(self.CLEAN, withheld, name="2026-05-04-personc-leaving.md"), 1)
+
+    def test_non_latin_slug_is_caught(self):
+        # Regression: an ASCII tokeniser saw nothing in a CJK filename. Scripts with
+        # no case system always qualify as entities, because case cannot rule them out.
+        withheld = "## Withheld from x.md\n\n**Confidential:** 山田 was dismissed.\n"
+        self.assertEqual(self._run(self.CLEAN, withheld, name="2026-05-04-山田-dismissal.md"), 1)
+
+    def test_common_word_does_not_fail_a_clean_slug(self):
+        # The other direction, and just as important: a gate that fails ordinary
+        # archives gets bypassed, which is a security outcome rather than a usability one.
+        withheld = "## Withheld from x.md\n\n**Confidential:** PersonD left the team.\n"
+        self.assertEqual(self._run(self.CLEAN, withheld, name="2026-05-04-team-update.md"), 0)
+
+    def test_block_scalar_source_is_checked(self):
+        # Regression: a line-prefix check never saw `source: >-` with the value on the
+        # following line, so a subject rode through valid YAML.
+        withheld = "## Withheld from x.md\n\n**Confidential:** Project Nightingale closes Friday.\n"
+        note = self.CLEAN.replace(
+            "redacted: true",
+            "source: >-\n  sessions/2026-05-04-nightingale-close.md\nredacted: true")
+        self.assertEqual(self._run(note, withheld), 1)
+
+    def test_hidden_notice_does_not_satisfy_the_visible_rule(self):
+        # Regression: an HTML comment renders as nothing, so it is not a notice.
+        hidden = self.CLEAN.replace(
+            "> [!warning] Withheld from archive\n> 1 block withheld: personnel.\n",
+            "<!-- Withheld from archive -->\n")
+        self.assertEqual(self._run(hidden, self.WITHHELD), 1)
+
+    def test_clean_log_verifies_without_a_redacted_file(self):
+        # A log with nothing withheld had no redacted file, so the mandatory step could
+        # not run and was skipped in practice. A skipped step is the escape a missed
+        # redaction needs, so the clean case asserts rather than exempts.
+        note = ("---\ntype: session-log\ndate: 2026-05-04\nredacted: false\n---\n"
+                "# Topic\n\nNothing withheld here.\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            a = Path(tmp) / "2026-05-04-topic.md"; a.write_text(note)
+            rc = subprocess.run(
+                [sys.executable, str(VERIFIER), str(a), "--no-withheld", "--quiet"],
+                capture_output=True, text=True).returncode
+        self.assertEqual(rc, 0)
+
+    def test_clean_claim_contradicted_by_frontmatter_fails(self):
+        note = ("---\ntype: session-log\ndate: 2026-05-04\nredacted: true\n---\n"
+                "# Topic\n\nBody.\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            a = Path(tmp) / "2026-05-04-topic.md"; a.write_text(note)
+            rc = subprocess.run(
+                [sys.executable, str(VERIFIER), str(a), "--no-withheld", "--quiet"],
+                capture_output=True, text=True).returncode
+        self.assertEqual(rc, 1)
 
     def test_empty_withheld_file_fails_closed(self):
         # An empty redacted file means the withheld material was lost. Passing here
