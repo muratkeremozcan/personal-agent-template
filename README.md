@@ -210,7 +210,15 @@ mkdir -p ~/local-agent/archive        # or: export LOCAL_AGENT_ARCHIVE=~/notes/a
 ```
 
 `curate.py` then reports each aged log with the path it archives to, instead of a
-bare age that reads as an instruction to delete. `references/archive.md` is the
+bare age that reads as an instruction to delete.
+
+Archived logs carry `people:`, `themes:` and `repos:` frontmatter, and one small
+note per entity listing every log that references it turns the archive into a
+precomputed index. Measured in one deployment: answering "when did contract
+testing happen" cost 22 files and ~64,000 tokens by grep, against 1 file and ~227
+tokens by index. An agent's recall is bounded by what it can afford to read, so
+that ratio decides whether a question about five years of history is answerable
+inside one context window at all. `references/archive.md` is the
 procedure and owns the redaction gate on what may leave the sanctum;
 `scripts/verify_archive_redaction.py` makes that gate checkable rather than
 asserted. Full rationale, and what an Obsidian vault adds if you use one, in

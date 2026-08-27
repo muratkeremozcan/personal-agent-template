@@ -78,29 +78,59 @@ Three rules that are easy to get wrong and were, in a real deployment:
   three verbatim copies of the sanctum filename. A log named for its subject leaks it three
   times over while the body shows nothing.
 
-## Obsidian, if you want the graph
+## Entity notes: the part that changes what the agent can recall
 
-Nothing above needs Obsidian. An archive is markdown in folders and any editor reads it.
+This is the highest-value half of the archive tier and it is easy to mistake for decoration.
 
-What Obsidian adds is that `[[wikilinks]]` in the archived frontmatter become a navigable
-graph. Archive a year of session logs with `people:`, `themes:` and `repos:` lists, and
-clusters appear on their own: the people who recur together, the themes that bridge two jobs,
-the repository that every incident traces back to. That is a tool for the owner rather than
-for the agent, which reads the files directly either way.
+Archived logs carry `people:`, `themes:` and `repos:` frontmatter. Generate one small note per
+entity, whose body is the list of every log referencing it, and each of those notes becomes a
+**precomputed retrieval index**. It is worth being concrete about the difference. In one real
+deployment, answering "when did contract testing happen, and where" cost:
 
-Two properties make it work well as an archive:
+| | files opened | tokens read | reliability |
+|---|---|---|---|
+| grep the archive | 22 | ~64,000 | a regex the agent invented; a miss is silent |
+| open `theme/contract-testing.md` | 1 | ~227 | complete by construction |
 
-- **Plain files, no lock-in.** No database and no proprietary format. Everything the graph
-  knows is derived from text on disk, so the agent needs no integration to read or write it.
-- **Unresolved links are free nodes.** A link to `[[TICKET-123]]` is a graph node whether or
-  not a file by that name exists. Hundreds of tickets and repositories reach the graph at no
-  cost in files, and writing a stub for each that said "mentioned once" would be worse in
-  every way.
+**281 times less context, and correct rather than hopeful.** The index answered with a
+five-year arc, December 2021 through August 2026, because it was built when the notes were
+written rather than guessed at read time.
+
+That is the argument for entity notes. An agent's recall is bounded by what it can afford to
+read, so an index that collapses a full-text sweep into one file is not a convenience; it
+decides whether a question about five years of history is answerable at all inside one
+context window.
+
+The indexes also compound. Every archived log adds itself to the entities it mentions, so the
+answer to "what is the history with this person, this repository, this theme" gets better on
+its own with no maintenance.
+
+## Obsidian, if you want it
+
+Nothing above needs Obsidian. An archive is markdown in folders, the entity notes are markdown
+too, and any editor reads all of it. What Obsidian adds is threefold, in descending order of
+value to the agent:
+
+- **Backlinks maintained for free.** Obsidian resolves `[[wikilinks]]` continuously, so the
+  entity indexes stay correct as an editor moves and renames things. Hand-maintained indexes
+  rot; these do not.
+- **Unresolved links are free nodes.** A link to `[[TICKET-123]]` resolves as a graph node
+  whether or not a file by that name exists. Hundreds of tickets and repositories become
+  navigable at no cost in files, and writing a stub for each saying "mentioned once" would be
+  worse in every way.
+- **The graph view.** Clusters appear on their own: people who recur together, themes that
+  bridge two jobs, the repository every incident traces back to. This one is genuinely for the
+  owner, and it is the part most likely to be mistaken for the whole feature.
+
+Plain files and no lock-in throughout. There is no database and no proprietary format;
+everything the graph knows is derived from text on disk, so the agent needs no integration to
+read or write any of it.
 
 To point the agent at a vault, set `LOCAL_AGENT_ARCHIVE` to it and the archive lands in
 `<vault>/log/YYYY/MM/`.
 
-An MCP server is available (the Local REST API plugin serves one) and is worth having for one
-specific reason: it exposes Obsidian's own resolved link index, so link-integrity checks stop
-depending on a regex approximation of Obsidian's parser. It is not required, it needs the app
-running, and it adds nothing to what the agent can remember.
+An MCP server is available, since the Local REST API plugin serves one. It is worth having for
+a narrow reason: it exposes Obsidian's own resolved link index, so link-integrity checks stop
+depending on a regex approximation of Obsidian's parser, which is a real source of wrong
+answers. It requires the app to be running, and it is the entity notes rather than the MCP that
+change what the agent can recall.
