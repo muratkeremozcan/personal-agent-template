@@ -165,18 +165,44 @@ Preserve the existing lifecycle mechanism:
 - scripts/wake.py
 - scripts/curate.py
 - scripts/_sanctum.py
+- scripts/verify_archive_redaction.py
+- scripts/install_global.py
 - scripts/tests/
 - generic assets and references already present
 
 Do not regenerate, replace, or relocate the lifecycle scripts. They are tested.
 Wire them into the generated SKILL.md:
-- On every activation, run wake.py with the active project root.
+- Add a Conventions block: `{skill-root}` is this skill's installed directory,
+  `{project-root}` is the project the session is working in, and every script
+  runs as `uv run {skill-root}/scripts/<name>.py`. A bare `scripts/<name>.py`
+  resolves only from inside the skill directory and fails everywhere else.
+- State that the sanctum lives at a fixed home, `~/local-agent/_bmad/memory/local-agent/`
+  by default or under `$LOCAL_AGENT_HOME`, whatever directory the agent is
+  invoked from. `{project-root}` plays no part in locating it.
+- On every activation, run `uv run {skill-root}/scripts/wake.py {project-root}`.
 - FIRST_BREATH loads references/first-breath.md.
 - FIRST_BREATH_RESUME loads references/first-breath.md and preserves partial state.
 - WAKING uses the identity bundle emitted by wake.py.
 - A CURATION DUE block in wake.py's output loads references/curation-pass.md and
   runs the pass before the session ends. No block means the sanctum is healthy.
 - Memory curation runs curate.py for exact metrics before any model-led edits.
+- When curate.py reports an archive destination, aged session logs go through
+  references/archive.md before they are pruned.
+- A one-shot Remember or Recall (a scripted call with no back-and-forth) still
+  wakes fully, then skips the greeting and returns only the confirmation or the
+  quoted stored fact. references/curation-pass.md and wake.py already refer to
+  this mode.
+
+Include these standing rules in SKILL.md, bound for every turn of the session:
+- Continuity: the agent is one continuous self that reloads from its sanctum on
+  waking. It never fabricates what the sanctum did not store.
+- Stay in character during normal interaction and keep the machinery out of
+  view, with one exception: when the owner asks an architecture or debugging
+  question about the agent itself, answer transparently in plain engineering
+  terms.
+- Persistent memory: capture to the sanctum the moment something is worth
+  keeping. Owners often end a session with no signal, so writing waits for
+  nothing. Load references/memory-guidance.md the first time memory is tended.
 
 The CURATION DUE step is what keeps memory from bloating without anyone tending
 it. Omit it and the token guardrails become advisory, since nothing else in the
@@ -272,11 +298,10 @@ before committing. It must not add sanctum data or raw imports to the module.
 From the repository root:
 
 ```bash
-uv run skills/local-agent/scripts/tests/test_wake.py
-uv run skills/local-agent/scripts/tests/test_curate.py
-uv run skills/local-agent/scripts/tests/test_init_sanctum.py
-uv run skills/local-agent/scripts/tests/test_lifecycle.py
+python3 -m unittest discover -s skills/local-agent/scripts/tests -v
 ```
+
+CI runs the same command on Python 3.10 and 3.13, plus `uvx ruff check .`.
 
 The suite verifies:
 
@@ -286,6 +311,9 @@ The suite verifies:
 - deterministic scaffolding and idempotency
 - generic Remember and Recall discovery
 - external capability source formatting
+- the archive redaction gate, including credential shapes, look-alike
+  characters, and completeness against the source log
+- discovery-link installation
 
 ## 9. Install the Generated Skill
 
@@ -300,6 +328,18 @@ Choose **Modify Install**, preserve the existing module and AI-tool selections,
 then add `~/local-agent/skills` when prompted for a custom source. The installer
 discovers `local-agent` directly from its `SKILL.md` and exposes it to the
 selected tools. This works whether step 7 packaged the skill or was skipped.
+
+To skip the installer, link the checkout straight into each tool's user-level
+skill folder instead:
+
+```bash
+uv run ~/local-agent/skills/local-agent/scripts/install_global.py
+```
+
+It creates relative symlinks in `~/.claude/skills`, `~/.agents/skills`,
+`~/.codex/skills`, and `~/.gemini/config/skills`, plus any companion skills under
+`skills/` and subagents under `agents/`. It refuses to replace a real file or
+directory, and a second run changes nothing.
 
 Confirm that each selected tool can discover `local-agent` before continuing.
 The [custom-module installation guide](https://docs.bmad-method.org/how-to/install-custom-modules/)

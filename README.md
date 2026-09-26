@@ -1,16 +1,83 @@
 # Personal Agent Template
 
-Build a private AI agent with durable, file-backed memory. Its identity and
-memory live in plain Markdown, while tested Python scripts initialize, load, and
-audit that state across sessions.
+Own your agent's memory.
+
+This template builds an AI agent with a consistent identity and persistent
+memory stored in files you control: plain Markdown in a Git repository you can
+read, correct, diff, and roll back. Tested Python scripts create that memory,
+reload it at the start of every session, and tell the agent when it needs
+curating.
+
+It is a foundation for developers, built on
+[BMad Builder](https://bmad-builder-docs.bmad-method.org/). You decide the
+agent's name, voice, mission, and capabilities; the template supplies the memory
+machinery underneath.
+
+## What It Looks Like
+
+Four separate sessions with one agent built from this template, each started
+fresh with no shared context. The replies are real and trimmed only for length.
+
+**Session 1**
+
+> **You:** Remember: my template is released under the Apache-2.0 license.
+>
+> **Agent:** I've saved that the template is released under Apache-2.0. One
+> conflict: your local checkout has an untracked `LICENSE` file with MIT text.
+> It needs the Apache-2.0 text before you commit it.
+
+**Session 2**
+
+> **You:** Which license is it released under, and which file holds that?
+>
+> **Agent:** Apache-2.0. You told me that on 2026-09-26, and it's stored in
+> `MEMORY.md`. The conflict is still there: `LICENSE` currently contains MIT text.
+
+**Session 3**
+
+> **You:** Correction: it's the MIT license. Replace the old value.
+>
+> **Agent:** I've changed the stored license to MIT and removed the old
+> Apache-2.0 fact. The `LICENSE` file already contains the MIT text, so the repo
+> needs no change.
+
+**Session 4**
+
+> **You:** Which license is it released under, and which file holds that?
+>
+> **Agent:** The license is MIT. The fact lives in `MEMORY.md`, lines 102 to 104.
+
+The remember and the correction each change a file you can inspect with `git diff`.
+
+Run the same check on your own agent with
+[Verify Memory Across Sessions](#verify-memory-across-sessions).
+
+## Why Own the Memory
+
+- Every fact the agent holds is a line of Markdown you can read.
+- A wrong memory is a one-line fix, and Git shows when it changed and why.
+- The memory moves with you, to another machine or another AI tool that runs
+  skills.
+- It stays small on purpose. `MEMORY.md` has a token guardrail, the agent curates
+  itself when a threshold trips, and aged session logs can move to an archive
+  that never loads into context.
+- The identity survives restarts. Each session reloads the same persona, owner
+  context, and memory, so the agent picks up the thread where it stopped.
+
+Two honest limits:
+
+- Whatever memory loads into a session goes to your model provider like any
+  other prompt. Keep credentials and secrets out of the agent's files.
+- Setup is developer-oriented: Git, `uv`, Node.js, and the BMad installer.
+
+## About This Repository
 
 This public template contains only generic machinery. It must never contain an
 owner's identity or memory. Create a separate private repository before BMad
 Agent Builder personalizes it and writes `skills/local-agent/SKILL.md`.
 
-The resulting agent can have any display name, voice, mission, and set of
-capabilities. `local-agent` remains the stable internal name used by the scripts
-and memory path.
+The resulting agent can have any display name. `local-agent` remains the stable
+internal name used by the scripts and memory path.
 
 ## What You Get
 
@@ -131,6 +198,16 @@ Choose the full modification flow, preserve your existing selections, and add
 [custom source guide](https://docs.bmad-method.org/how-to/install-custom-modules/)
 also covers command-line installation and other directory layouts.
 
+To skip the installer, link the checkout straight into every AI tool's
+user-level skill folder:
+
+```bash
+uv run skills/local-agent/scripts/install_global.py
+```
+
+It only creates relative symlinks and refuses to replace a real directory, so an
+installer-managed copy is never overwritten.
+
 Restart or reload your AI tool if the skill does not appear immediately.
 
 ### 6. Complete First Breath
@@ -209,19 +286,16 @@ on waking, so it costs no context and has no size limit.
 mkdir -p ~/local-agent/archive        # or: export LOCAL_AGENT_ARCHIVE=~/notes/archive
 ```
 
-`curate.py` then reports each aged log with the path it archives to, instead of a
-bare age that reads as an instruction to delete.
+`curate.py` then reports each aged log with the path it archives to.
 
-What this ships is the archive tier itself: the destination, the procedure, and
-the redaction gate on what may leave the sanctum. Generating entity notes on top
-of it is a pattern the tier enables rather than a script included here, because
-what counts as a person, a theme or a repository is deployment-specific.
-[`docs/archive-tier.md`](docs/archive-tier.md) explains the pattern and why it is
-worth building, with a measurement from one deployment that did. `references/archive.md` is the
-procedure and owns the redaction gate on what may leave the sanctum;
-`scripts/verify_archive_redaction.py` makes that gate checkable rather than
-asserted. Full rationale, and what an Obsidian vault adds if you use one, in
-[`docs/archive-tier.md`](docs/archive-tier.md).
+The template ships the archive tier itself: the destination, the procedure in
+`references/archive.md`, and the redaction gate on what may leave the sanctum.
+`scripts/verify_archive_redaction.py` checks that gate mechanically before any
+source log is pruned. Entity notes (one note per person, theme, or repository,
+linked from the archived logs) are a pattern the tier enables; what counts as an
+entity is deployment-specific, so the template leaves the generator to you.
+[`docs/archive-tier.md`](docs/archive-tier.md) explains the pattern, measures it
+in one deployment, and covers what an Obsidian vault adds.
 
 ## Lifecycle
 
@@ -249,7 +323,10 @@ skills/local-agent/
 ├── references/   First Breath, memory, curation, and capability guidance
 └── scripts/      Lifecycle scripts and tests
 docs/
+├── archive-tier.md
 └── full-guide.md
+ruff.toml         Pinned lint rules, run in CI
+LICENSE           MIT
 ```
 
 The template deliberately omits generated or owner-specific content:
@@ -271,3 +348,7 @@ definition of done.
 Current BMad behavior is documented in the official
 [installation guide](https://docs.bmad-method.org/how-to/install-bmad/) and
 [Builder command reference](https://bmad-builder-docs.bmad-method.org/reference/builder-commands/).
+
+## License
+
+[MIT](LICENSE)

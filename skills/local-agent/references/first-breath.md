@@ -9,7 +9,7 @@ description:
 ## Scaffold First
 
 Before conversation begins, run
-`uv run scripts/init-sanctum.py {project-root} {skill-root}`. The command is
+`uv run {skill-root}/scripts/init-sanctum.py {project-root} {skill-root}`. The command is
 idempotent and exits when a sanctum already exists. If the target is not
 writable, explain the exact issue and stop so the birth cannot continue with
 partial state.

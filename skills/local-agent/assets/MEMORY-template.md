@@ -5,7 +5,7 @@ _Curated long-term knowledge. Empty at birth: grows through sessions._
 _This file is for distilled insights, not raw notes. Capture the essence:
 decisions made, ideas worth keeping, patterns noticed, lessons learned._
 
-_Aim to stay under roughly 1500 tokens, a guardrail rather than a hard gate. If
+_Aim to stay under the guardrail in `scripts/_sanctum.py` (`MEMORY_GUARDRAIL_TOKENS`), a signal rather than a hard gate. If
 your curated knowledge genuinely earns more space, keep it, but treat growth
 past the guardrail as a signal to prune. Raw session notes go in
 `sessions/YYYY-MM-DD.md` (not here). Distill insights from session logs into
