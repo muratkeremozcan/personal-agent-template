@@ -40,6 +40,7 @@ Exit codes: 0 success, 1 no sanctum found, 2 usage error.
 """
 
 import argparse
+import functools
 import importlib
 import json
 import sys
@@ -47,10 +48,9 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _sanctum import (  # noqa: E402
+from _sanctum import (
     BORN_MARKER,
     ENTRY_LINE,
-    IDENTITY_FILES as WAKE_FILES,
     INDEX_ENTRY_DEMOTE_CHARS,
     INDEX_ENTRY_TARGET_CHARS,
     INDEX_MAX_BYTES,
@@ -59,13 +59,17 @@ from _sanctum import (  # noqa: E402
     SESSION_RETENTION_DAYS,
     SKILL_NAME,
     WAKE_BUDGET_TOKENS,
+    ArchiveMisconfigured,
+    archive_root,
+    archive_target,
+    local_today,
     prose_of,
     sanctum_home,
     stale_logs,
-    archive_root,
     undated_logs,
-    ArchiveMisconfigured,
-    archive_target,
+)
+from _sanctum import (
+    IDENTITY_FILES as WAKE_FILES,
 )
 
 # The always-present skeleton: structural, not organic, so not index-drift candidates.
@@ -74,14 +78,39 @@ SKELETON = set(WAKE_FILES)
 STRUCTURAL_DIRS = {"references", "scripts", "sessions"}
 
 
-def count_tokens(text: str) -> tuple[int, str]:
-    """Return (token_count, method), falling back to chars//4 without tiktoken."""
+@functools.lru_cache(maxsize=1)
+def _encoder():
+    """The tiktoken encoder, or None with the reason it could not be loaded.
+
+    tiktoken fetches its BPE table over the network the first time an encoding is
+    used, so a missing package and an offline first run both land here. Either way
+    the report still comes out, with counts estimated at four characters per token,
+    and the reason travels in the report and on stderr so an estimate is never
+    mistaken for an exact count. Cached, because loading the encoder once per file
+    was the slowest part of a curate run.
+    """
     try:
         tiktoken = importlib.import_module("tiktoken")
-        enc = tiktoken.get_encoding("cl100k_base")
-        return len(enc.encode(text)), "tiktoken"
-    except Exception:
+    except ModuleNotFoundError:
+        return None, "tiktoken is not installed"
+    try:
+        return tiktoken.get_encoding("cl100k_base"), None
+    except Exception as exc:  # noqa: BLE001  any transport error means the same fallback
+        return None, f"tiktoken could not load cl100k_base ({type(exc).__name__}: {exc})"
+
+
+def count_tokens(text: str) -> tuple[int, str]:
+    """Return (token_count, method). Without tiktoken the count is chars//4, `fallback`."""
+    enc, _ = _encoder()
+    if enc is None:
         return len(text) // 4, "fallback"
+    return len(enc.encode(text)), "tiktoken"
+
+
+def tokenizer_status() -> dict:
+    """How the counts in this report were produced, so a fallback is never read as exact."""
+    enc, reason = _encoder()
+    return {"method": "tiktoken" if enc else "fallback", "reason": reason}
 
 
 def measure_memory(sanctum: Path, guardrail: int) -> dict:
@@ -245,7 +274,11 @@ def index_drift(sanctum: Path) -> dict:
             continue
         if entry.name == "capabilities":
             # Learned capabilities must each be registered.
+            # Interpreter caches and dotfiles are not capabilities; flagging them
+            # trained the owner to ignore the drift report.
             for cap in sorted(entry.iterdir()):
+                if cap.name.startswith(".") or cap.name == "__pycache__":
+                    continue
                 candidates.append(f"capabilities/{cap.name}")
             continue
         if entry.name == "knowledge":
@@ -270,7 +303,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "project_root",
-        help="the project you're working in (informational only; it does not determine sanctum location)",
+        help=(
+            "the project you're working in "
+            "(informational only; it does not determine sanctum location)"
+        ),
     )
     p.add_argument(
         "--days",
@@ -298,12 +334,19 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": "no sanctum", "sanctum": str(sanctum)}))
         return 1
 
-    today = date.today()
+    today = local_today()
+    tokenizer = tokenizer_status()
+    if tokenizer["reason"]:
+        print(
+            f"warning: {tokenizer['reason']}; token counts are chars//4 estimates",
+            file=sys.stderr,
+        )
     report = {
         "sanctum": str(sanctum),
         "invoked_from": str(project_root),
         "born": (sanctum / BORN_MARKER).is_file(),
         "checked_on": today.isoformat(),
+        "tokenizer": tokenizer,
         "memory_md": measure_memory(sanctum, args.guardrail),
         "wake_cost": measure_wake(sanctum, args.wake_budget),
         "index_md": measure_index(sanctum),

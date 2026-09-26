@@ -21,20 +21,25 @@ separate from runtime memory.
 Usage:
     uv run init-sanctum.py <project-root> <skill-path>
 
-    project-root: The root of the project (where _bmad/ lives)
+    project-root: The project you are working in. Recorded in the templates and
+                  printed back; it plays no part in where the sanctum lives.
     skill-path:   Path to the skill directory (where SKILL.md, references/, assets/ live)
 """
 
-import sys
 import re
 import shutil
-from datetime import date
+import sys
 from pathlib import Path
 
-# --- Agent-specific configuration ---
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _sanctum import local_today, sanctum_home, sanctum_path
 
-SKILL_NAME = "local-agent"
-SANCTUM_DIR = SKILL_NAME
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    tomllib = None
+
+# --- Agent-specific configuration ---
 
 # Files that stay in the skill bundle (only used during First Breath)
 SKILL_ONLY_FILES = {"first-breath.md"}
@@ -47,6 +52,10 @@ TEMPLATE_FILES = [
     "MEMORY-template.md",
 ]
 
+# Scripts that act on the skill bundle itself, so a sanctum copy would point at the wrong
+# tree: First Breath scaffolding, and the discovery-link installer.
+BUNDLE_ONLY_SCRIPTS = {"init-sanctum.py", "install_global.py"}
+
 # Whether the owner can teach this agent new capabilities
 EVOLVABLE = True
 
@@ -58,9 +67,9 @@ def parse_yaml_config(config_path: Path) -> dict:
     config = {}
     if not config_path.exists():
         return config
-    with open(config_path) as f:
-        for line in f:
-            line = line.strip()
+    with open(config_path, encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
             if ":" in line:
@@ -102,9 +111,7 @@ def parse_toml_config(config_path: Path) -> dict:
     if not config_path.exists():
         return {}
 
-    try:
-        import tomllib
-    except ModuleNotFoundError:
+    if tomllib is None:
         return _parse_simple_toml(config_path)
 
     with open(config_path, "rb") as config_file:
@@ -114,7 +121,7 @@ def parse_toml_config(config_path: Path) -> dict:
 def parse_frontmatter(file_path: Path) -> dict:
     """Extract YAML frontmatter from a markdown file."""
     meta = {}
-    with open(file_path) as f:
+    with open(file_path, encoding="utf-8") as f:
         content = f.read()
 
     match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
@@ -151,7 +158,7 @@ def copy_scripts(source_dir: Path, dest_dir: Path) -> list[str]:
     copied = []
 
     for source_file in sorted(source_dir.iterdir()):
-        if source_file.is_file() and source_file.name != "init-sanctum.py":
+        if source_file.is_file() and source_file.name not in BUNDLE_ONLY_SCRIPTS:
             shutil.copy2(source_file, dest_dir / source_file.name)
             copied.append(source_file.name)
 
@@ -229,8 +236,11 @@ def generate_capabilities_md(capabilities: list[dict], evolvable: bool) -> str:
             "",
             "## Tools",
             "",
-            "Prefer crafting your own tools over depending on external ones. A script you wrote "
-            "and saved is more reliable than an external API. Use the file system creatively.",
+            (
+                "Prefer crafting your own tools over depending on external ones. A script "
+                "you wrote and saved is more reliable than an external API. Use the file "
+                "system creatively."
+            ),
             "",
             "### User-Provided Tools",
             "",
@@ -256,24 +266,26 @@ def main():
     project_root = Path(sys.argv[1]).resolve()
     skill_path = Path(sys.argv[2]).resolve()
 
-    # Paths
-    bmad_dir = project_root / "_bmad"
-    memory_dir = bmad_dir / "memory"
-    sanctum_path = memory_dir / SANCTUM_DIR
+    # Paths. The sanctum and the config it is seeded from both live at the canonical
+    # home; wake.py resolves the same function, so the two can never disagree. Building
+    # them from project_root once scaffolded a sanctum that wake.py never found, and
+    # First Breath started over on every activation from another directory.
+    bmad_dir = sanctum_home() / "_bmad"
+    sanctum = sanctum_path()
     assets_dir = skill_path / "assets"
     references_dir = skill_path / "references"
     scripts_dir = skill_path / "scripts"
 
     # Sanctum subdirectories
-    sanctum_refs = sanctum_path / "references"
-    sanctum_scripts = sanctum_path / "scripts"
+    sanctum_refs = sanctum / "references"
+    sanctum_scripts = sanctum / "scripts"
 
     # Relative path for CAPABILITIES.md references (agent loads from within sanctum)
     sanctum_refs_path = "references"
 
     # Check if sanctum already exists
-    if sanctum_path.exists():
-        print(f"Sanctum already exists at {sanctum_path}")
+    if sanctum.exists():
+        print(f"Sanctum already exists at {sanctum}")
         print("This agent has already been born. Skipping First Breath scaffolding.")
         sys.exit(0)
 
@@ -288,21 +300,21 @@ def main():
         config.update(parser(bmad_dir / config_file))
 
     # Build variable substitution map
-    today = date.today().isoformat()
+    today = local_today().isoformat()
     variables = {
         "user_name": config.get("user_name", "friend"),
         "communication_language": config.get("communication_language", "English"),
         "birth_date": today,
         "project_root": str(project_root),
-        "sanctum_path": str(sanctum_path),
+        "sanctum_path": str(sanctum),
     }
 
     # Create sanctum structure
-    sanctum_path.mkdir(parents=True, exist_ok=True)
-    (sanctum_path / "capabilities").mkdir(exist_ok=True)
-    (sanctum_path / "knowledge").mkdir(exist_ok=True)
-    (sanctum_path / "sessions").mkdir(exist_ok=True)
-    print(f"Created sanctum at {sanctum_path}")
+    sanctum.mkdir(parents=True, exist_ok=True)
+    (sanctum / "capabilities").mkdir(exist_ok=True)
+    (sanctum / "knowledge").mkdir(exist_ok=True)
+    (sanctum / "sessions").mkdir(exist_ok=True)
+    print(f"Created sanctum at {sanctum}")
 
     # Copy reference files (capabilities + techniques + guidance) into sanctum
     copied_refs = copy_references(references_dir, sanctum_refs)
@@ -329,17 +341,17 @@ def main():
         # Fix extension casing: .MD -> .md
         output_name = output_name[:-3] + ".md"
 
-        content = template_path.read_text()
+        content = template_path.read_text(encoding="utf-8")
         content = substitute_vars(content, variables)
 
-        output_path = sanctum_path / output_name
-        output_path.write_text(content)
+        output_path = sanctum / output_name
+        output_path.write_text(content, encoding="utf-8")
         print(f"  Created {output_name}")
 
     # Auto-generate CAPABILITIES.md from references/ frontmatter
     capabilities = discover_capabilities(references_dir, sanctum_refs_path)
     capabilities_content = generate_capabilities_md(capabilities, evolvable=EVOLVABLE)
-    (sanctum_path / "CAPABILITIES.md").write_text(capabilities_content)
+    (sanctum / "CAPABILITIES.md").write_text(capabilities_content, encoding="utf-8")
     print(
         f"  Created CAPABILITIES.md ({len(capabilities)} built-in capabilities discovered)"
     )
@@ -347,7 +359,7 @@ def main():
     print()
     print("First Breath scaffolding complete.")
     print("The conversational awakening can now begin.")
-    print(f"Sanctum: {sanctum_path}")
+    print(f"Sanctum: {sanctum}")
 
 
 if __name__ == "__main__":
