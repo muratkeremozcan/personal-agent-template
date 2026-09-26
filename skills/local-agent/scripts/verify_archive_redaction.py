@@ -417,17 +417,21 @@ def notices(body: str) -> list[tuple[int, str]]:
 
 
 def strip_notices(body: str) -> str:
-    """Body with every notice callout blanked, line count preserved so line numbers in
-    failure messages still point at the right place."""
+    """Body with each notice's own wording blanked: the heading and the `N blocks withheld:
+    <categories>` prefix. Everything after them in the callout stays, so a marker placed
+    inside a notice is still caught. Line count is preserved so line numbers in failure
+    messages still point at the right place."""
     lines = body.split("\n")
     i = 0
     while i < len(lines):
         if NOTICE_HEAD.match(lines[i]):
             lines[i] = ""
             i += 1
-            while i < len(lines) and lines[i].lstrip().startswith(">"):
-                lines[i] = ""
-                i += 1
+            if i < len(lines) and lines[i].lstrip().startswith(">"):
+                content = lines[i].lstrip()[1:].lstrip()
+                count = NOTICE_COUNT.match(content)
+                if count:
+                    lines[i] = "> " + content[count.end() :].lstrip()
             continue
         i += 1
     return "\n".join(lines)

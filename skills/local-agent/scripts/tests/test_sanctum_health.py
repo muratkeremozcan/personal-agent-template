@@ -10,6 +10,7 @@ fired because nothing was scheduled to look.
 """
 
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -148,7 +149,7 @@ class WakeNoticeTests(unittest.TestCase):
             line = next(
                 ln for ln in out.stdout.splitlines() if ln.startswith("Exact token counts:")
             )
-            script, target = line.split("uv run ", 1)[1].split(" ", 1)
+            script, target = shlex.split(line.split("uv run ", 1)[1])
             self.assertTrue(Path(script).is_absolute(), script)
             env = dict(os.environ)
             env["LOCAL_AGENT_HOME"] = str(home)

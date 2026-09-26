@@ -263,6 +263,14 @@ class SourceCompletenessTests(GateTestCase):
 
 
 class MarkerTests(GateTestCase):
+    def test_marker_inside_the_notice_callout_fails(self):
+        marked = replace_once(
+            NOTE, NOTICE_BODY, NOTICE_BODY + "> **Confidential:** the Acme lease ends in June.\n"
+        )
+        self.assert_fail(
+            self.run_gate(self.note(marked), self.redacted()), "confidentiality marker"
+        )
+
     def test_confidential_label_in_the_note_fails(self):
         # The marked block never reached the redacted file, so no text comparison can
         # see it. The marker itself is the evidence.

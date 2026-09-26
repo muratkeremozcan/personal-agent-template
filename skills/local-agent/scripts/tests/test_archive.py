@@ -89,8 +89,8 @@ class ArchiveRootTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             sanctum = Path(tmp)
             (sanctum / "sessions").mkdir()
-            (sanctum / "sessions" / "no-date.md").write_text("x")
-            (sanctum / "sessions" / "2026-05-04-topic.md").write_text("x")
+            (sanctum / "sessions" / "no-date.md").write_text("x", encoding="utf-8")
+            (sanctum / "sessions" / "2026-05-04-topic.md").write_text("x", encoding="utf-8")
             self.assertEqual(_sanctum.undated_logs(sanctum), ["no-date.md"])
 
     def test_target_month_matches_the_staleness_rule(self):
@@ -100,8 +100,8 @@ class ArchiveRootTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             sanctum = Path(tmp)
             (sanctum / "sessions").mkdir()
-            (sanctum / "sessions" / name).write_text("x")
-            (sanctum / _sanctum.BORN_MARKER).write_text("2020-01-01")
+            (sanctum / "sessions" / name).write_text("x", encoding="utf-8")
+            (sanctum / _sanctum.BORN_MARKER).write_text("2020-01-01", encoding="utf-8")
             stale = _sanctum.stale_logs(sanctum, 14, date(2026, 6, 1))
         self.assertIn(name, stale)
         self.assertIn("/2026/01/", _sanctum.archive_target(name, Path("/a")))
@@ -134,7 +134,7 @@ class RedactionGateTest(unittest.TestCase):
     def _note(self, text: str, name: str = "2026-05-04-topic.md") -> Path:
         path = self.archive / "log" / "2026" / "05" / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
+        path.write_text(text, encoding="utf-8")
         return path
 
     def _gate(self, *args) -> subprocess.CompletedProcess:
@@ -148,7 +148,7 @@ class RedactionGateTest(unittest.TestCase):
         # The slug is the sanctum filename, so `source:` follows the name under test.
         a = self._note(archived.replace("2026-05-04-topic", Path(name).stem), name)
         w = self.redacted_dir / name
-        w.write_text(withheld)
+        w.write_text(withheld, encoding="utf-8")
         result = self._gate(a, w, "--quiet", *extra)
         if expect is not None:
             self.assertIn(expect, result.stderr)
@@ -194,7 +194,7 @@ class RedactionGateTest(unittest.TestCase):
 
     def test_unreadable_input_fails_closed(self):
         w = self.redacted_dir / "2026-05-04-topic.md"
-        w.write_text(self.WITHHELD)
+        w.write_text(self.WITHHELD, encoding="utf-8")
         rc = self._gate(self.archive / "missing.md", w).returncode
         # 2 rather than 1: a check that could not run must block the prune exactly
         # as a failing one does, and must be distinguishable from a clean pass.

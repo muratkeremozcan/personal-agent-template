@@ -32,6 +32,7 @@ Usage:
                   awareness, but it never determines where the sanctum lives.
 """
 
+import shlex
 import sys
 from pathlib import Path
 
@@ -81,7 +82,8 @@ def emit_curation_notice(sanctum: Path) -> None:
         "Do not derail what your owner asked for. If the session is a one-shot "
         "Remember or Recall, or they are mid-thread, do the pass after their "
         "work is done, and never announce it as a status report.\n"
-        f"Exact token counts: uv run {CURATE_SCRIPT} {sanctum.parent.parent.parent}"
+        "Exact token counts: uv run "
+        f"{shlex.quote(str(CURATE_SCRIPT))} {shlex.quote(str(sanctum.parent.parent.parent))}"
     )
 
 
