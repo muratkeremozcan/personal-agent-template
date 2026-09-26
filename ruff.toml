@@ -1,0 +1,45 @@
+# Repo-level ruff configuration.
+#
+# Pinning the rule set keeps lint reproducible on every machine. Without a config file
+# ruff applies whatever default set the installed version ships, and that set changes
+# between releases. Every rule family below is named explicitly, so a ruff upgrade
+# changes nothing until someone edits this file.
+
+# Matches `requires-python` in the scripts' inline metadata.
+target-version = "py310"
+line-length = 100
+src = [".", "skills/local-agent/scripts"]
+
+# Only Python is linted; newer ruff defaults would otherwise scan Python fences inside
+# Markdown files too.
+include = ["*.py", "*.pyi"]
+
+# Trees the BMad installer writes into a derived repository are tool-owned.
+extend-exclude = [".agents", ".claude", "_bmad", "node_modules", "*.md"]
+force-exclude = true
+
+[lint]
+select = [
+    "E4", "E7", "E9", "E501", "W",  # pycodestyle
+    "F",      # pyflakes
+    "I",      # import order
+    "UP",     # pyupgrade, bounded by target-version
+    "B",      # bugbear
+    "SIM",    # simplify
+    "RUF",    # ruff-specific
+    "PLC", "PLE", "PLW",  # pylint convention, error and warning groups
+    "DTZ",    # naive datetimes
+    "BLE",    # blind except
+    "TRY",    # exception hygiene
+    "ISC",    # implicit string concatenation
+    "C4",     # comprehensions
+    "FURB",   # refurb
+]
+ignore = [
+    # These scripts raise errors carrying the exact message the user sees; a class per
+    # failure would add ceremony without adding information.
+    "TRY003",
+]
+
+[lint.isort]
+known-first-party = ["_sanctum"]

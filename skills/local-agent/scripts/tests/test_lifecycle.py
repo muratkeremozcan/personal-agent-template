@@ -30,44 +30,52 @@ class LifecycleTests(unittest.TestCase):
         )
 
     def test_full_lifecycle_from_an_unrelated_project(self):
-        with tempfile.TemporaryDirectory() as home_dir:
-            with tempfile.TemporaryDirectory() as active_project_dir:
-                home = Path(home_dir)
-                active_project = Path(active_project_dir)
-                (home / "_bmad").mkdir()
+        with (
+            tempfile.TemporaryDirectory() as home_dir,
+            tempfile.TemporaryDirectory() as active_project_dir,
+        ):
+            home = Path(home_dir)
+            active_project = Path(active_project_dir)
+            (home / "_bmad").mkdir()
 
-                before_init = self.run_script("wake.py", active_project, home=home)
-                self.assertEqual(before_init.returncode, 0)
-                self.assertIn("MODE: FIRST_BREATH", before_init.stdout)
+            before_init = self.run_script("wake.py", active_project, home=home)
+            self.assertEqual(before_init.returncode, 0)
+            self.assertIn("MODE: FIRST_BREATH", before_init.stdout)
 
-                initialized = self.run_script("init-sanctum.py", home, SKILL_ROOT)
-                self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            # First Breath runs from the active project, as it does for a real
+            # owner. The sanctum must still land in the canonical home, or the
+            # next wake finds nothing and First Breath starts over.
+            initialized = self.run_script(
+                "init-sanctum.py", active_project, SKILL_ROOT, home=home
+            )
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
 
-                resume = self.run_script("wake.py", active_project, home=home)
-                self.assertEqual(resume.returncode, 0)
-                self.assertIn("MODE: FIRST_BREATH_RESUME", resume.stdout)
+            resume = self.run_script("wake.py", active_project, home=home)
+            self.assertEqual(resume.returncode, 0)
+            self.assertIn("MODE: FIRST_BREATH_RESUME", resume.stdout)
+            self.assertFalse((active_project / "_bmad").exists())
 
-                sanctum = home / "_bmad" / "memory" / "local-agent"
-                (sanctum / "PERSONA.md").write_text(
-                    "# Persona\n\n## Identity\n\n- **Name:** Example\n"
-                )
-                (sanctum / ".born").write_text("2026-07-19\n")
+            sanctum = home / "_bmad" / "memory" / "local-agent"
+            (sanctum / "PERSONA.md").write_text(
+                "# Persona\n\n## Identity\n\n- **Name:** Example\n"
+            )
+            (sanctum / ".born").write_text("2026-07-19\n")
 
-                waking = self.run_script("wake.py", active_project, home=home)
-                self.assertEqual(waking.returncode, 0)
-                self.assertIn("MODE: WAKING", waking.stdout)
-                self.assertIn("**Name:** Example", waking.stdout)
-                self.assertIn(
-                    f"Invoked from: {active_project.resolve()}", waking.stdout
-                )
-                self.assertIn(f"Sanctum: {sanctum.resolve()}", waking.stdout)
+            waking = self.run_script("wake.py", active_project, home=home)
+            self.assertEqual(waking.returncode, 0)
+            self.assertIn("MODE: WAKING", waking.stdout)
+            self.assertIn("**Name:** Example", waking.stdout)
+            self.assertIn(
+                f"Invoked from: {active_project.resolve()}", waking.stdout
+            )
+            self.assertIn(f"Sanctum: {sanctum.resolve()}", waking.stdout)
 
-                curated = self.run_script("curate.py", active_project, home=home)
-                self.assertEqual(curated.returncode, 0, curated.stderr)
-                report = json.loads(curated.stdout)
-                self.assertTrue(report["born"])
-                self.assertEqual(report["sanctum"], str(sanctum.resolve()))
-                self.assertEqual(report["invoked_from"], str(active_project.resolve()))
+            curated = self.run_script("curate.py", active_project, home=home)
+            self.assertEqual(curated.returncode, 0, curated.stderr)
+            report = json.loads(curated.stdout)
+            self.assertTrue(report["born"])
+            self.assertEqual(report["sanctum"], str(sanctum.resolve()))
+            self.assertEqual(report["invoked_from"], str(active_project.resolve()))
 
 
 if __name__ == "__main__":

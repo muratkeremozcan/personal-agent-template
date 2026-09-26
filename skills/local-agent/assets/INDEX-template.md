@@ -7,7 +7,7 @@ never here. Two rules keep it that way:
 - A correction to another file lives as a **banner at the top of the file it corrects**, not here.
 
 If a line here starts carrying content, the content belongs in the file. This index stays under
-200 lines and 25KB; `uv run scripts/curate.py {project-root}` reports every entry that has drifted.
+200 lines and 25KB; `uv run {skill-root}/scripts/curate.py {project-root}` reports every entry that has drifted.
 
 ## Standard Files
 

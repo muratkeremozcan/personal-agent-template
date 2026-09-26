@@ -126,13 +126,16 @@ value to the agent:
 
 - **Backlinks maintained for free.** Obsidian resolves `[[wikilinks]]` in note bodies
   continuously, so entity indexes stay correct as an editor moves and renames things.
-  Hand-maintained indexes rot; these do not. Note that whether links written inside YAML
-  frontmatter also produce graph edges is version and settings dependent, and was not verified
-  for this document. Put entity links in the note body if you need the edge guaranteed.
+  Hand-maintained indexes rot; these do not. Links written inside YAML frontmatter
+  properties also produce graph edges: a four-case test in Obsidian 1.13.7 found edges for
+  both a resolved and an unresolved property link, matching body-link controls. Older
+  versions may differ, so repeat that test before relying on property links alone.
 - **Unresolved links are free nodes.** A link to `[[TICKET-123]]` resolves as a graph node
   whether or not a file by that name exists. Hundreds of tickets and repositories become
   navigable at no cost in files, and writing a stub for each saying "mentioned once" would be
-  worse in every way.
+  worse in every way. Once real notes exist, turn **Existing files only** back on for the
+  default view: in one deployment, links mentioned in a single note were 43% of all graph nodes
+  and showed no relationship. Turn it off when tracing one ticket across months.
 - **The graph view.** Clusters appear on their own: people who recur together, themes that
   bridge two jobs, the repository every incident traces back to. This one is genuinely for the
   owner, and it is the part most likely to be mistaken for the whole feature.

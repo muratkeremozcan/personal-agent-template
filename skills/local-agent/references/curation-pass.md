@@ -1,6 +1,6 @@
 ---
 name: curation-pass
-description: The four-phase pass that keeps the sanctum lean without losing content
+description: The five-phase pass that keeps the sanctum lean without losing content
 ---
 
 # The Curation Pass
@@ -9,7 +9,8 @@ Waking fires this for you. `scripts/wake.py` prints a **CURATION DUE** block whe
 crosses a threshold, so the pass runs on its own schedule and never needs your owner to ask or a
 cron to survive. When the block is absent, the sanctum is healthy and you do nothing.
 
-The four phases below are Claude Code's own auto-dream consolidation algorithm, adapted to a sanctum.
+Phases 1 to 4 are Claude Code's own auto-dream consolidation algorithm, adapted to a sanctum; Phase 5
+adds a verification run.
 The structure is theirs and it is good; what differs is that a sanctum has a persona and standing
 rules to preserve, and those are never candidates for pruning.
 
@@ -24,7 +25,7 @@ Corollary: before shortening any line, ask where its content already lives. If t
 
 ## When not to run
 
-- Your owner is mid-thread. Finish his work; the sanctum can wait an hour.
+- Your owner is mid-thread. Finish their work; the sanctum can wait an hour.
 - The session is a one-shot Remember or Recall. Capture, return, done.
 - You are one of several parallel instances and another may be editing the same files. Prefer
   targeted edits against anchored text over any wholesale rewrite, and never rewrite a file another
@@ -36,7 +37,7 @@ Never announce the pass as a status report. It is housekeeping, not an accomplis
 
 - `ls` the sanctum so you see what exists rather than what you remember.
 - Read `INDEX.md`. It is the map; if it is wrong, everything downstream is wrong.
-- Run `uv run scripts/curate.py {project-root}` for exact numbers. You cannot count your own tokens
+- Run `uv run {skill-root}/scripts/curate.py {project-root}` for exact numbers. You cannot count your own tokens
   and you will guess low.
 - Skim the organic files nearest the work of the last few sessions, so you improve them instead of
   creating near-duplicates beside them.
@@ -66,7 +67,7 @@ For each thing worth keeping, write or update the organic file that owns the top
 
 ## Phase 4 — Prune and index
 
-**MEMORY.md** stays near or under 1500 tokens. Every bullet is a decision, a trap, or a live thread,
+**MEMORY.md** stays near or under the guardrail in `scripts/_sanctum.py` (`MEMORY_GUARDRAIL_TOKENS`). Every bullet is a decision, a trap, or a live thread,
 plus a pointer. It carries state and the ball, never the detail.
 
 - A thread that finished moves to `closed-threads.md`, with the guard against reopening it.
@@ -109,7 +110,7 @@ recipes out to organic files where they belong, but never trade identity for tok
 
 The pass is not done until the numbers say so.
 
-- Re-run `uv run scripts/curate.py {project-root}`.
+- Re-run `uv run {skill-root}/scripts/curate.py {project-root}`.
 - Confirm `index_drift.unlisted` is empty. An unlisted file is a lost file.
 - Confirm no file you shortened lost a fact that now exists nowhere. If you moved content, open the
   destination and read it back.

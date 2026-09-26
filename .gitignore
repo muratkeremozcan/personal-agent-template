@@ -29,3 +29,14 @@ imports/raw/
 # Optional private knowledge stays on the current device unless moved manually.
 # This is an owner-maintained convention. It is not a security boundary.
 _bmad/memory/local-agent/knowledge/private/
+
+# Machine-local runtime state a capability may keep inside the sanctum.
+_bmad/memory/local-agent/.runtime/
+
+# Per-machine overlays of shared config.
+*.local.json
+
+# Optional, when an Obsidian vault serves as the archive: per-device window state
+# and plugin files that hold credentials.
+# archive/.obsidian/workspace*.json
+# archive/.obsidian/plugins/obsidian-local-rest-api/data.json

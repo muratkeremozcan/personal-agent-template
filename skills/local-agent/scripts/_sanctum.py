@@ -18,7 +18,7 @@ and dependency-free. curate.py adds tiktoken for exact counts on top of this.
 
 import os
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 SKILL_NAME = "local-agent"
@@ -64,6 +64,15 @@ BYTES_PER_TOKEN = 4
 ENTRY_LINE = re.compile(r"^\s*[-*]\s+\S")
 BACKTICKED = re.compile(r"`[^`]*`")
 DATE_IN_NAME = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+
+def local_today() -> date:
+    """The owner's local calendar date.
+
+    Session logs are named by the day the owner lived, so ages are measured in the
+    local zone. Read the clock in UTC and convert, so the zone is explicit.
+    """
+    return datetime.now(timezone.utc).astimezone().date()
 
 
 def sanctum_home() -> Path:
@@ -210,19 +219,22 @@ def stale_logs(sanctum: Path, days: int, today: date) -> list[str]:
 
     The First Breath log is exempt however old it gets: its facts are distilled
     elsewhere, and the record of being born is continuity rather than a fact.
-    It is identified by the date in the `.born` marker, so no filename is
-    hardcoded and the rule holds for any agent built from this template.
+    It is `sessions/<born>.md`, named from the date in the `.born` marker (the name
+    first-breath.md instructs), so no filename is hardcoded and the rule holds for
+    any agent built from this template. Any other log written on the birth date
+    ages like the rest.
     """
     sessions = sanctum / "sessions"
     if not sessions.is_dir():
         return []
     born = birth_date(sanctum)
+    first_breath_log = f"{born.isoformat()}.md" if born else None
     out = []
     for path in sorted(sessions.glob("*.md")):
+        if path.name == first_breath_log:
+            continue
         log_date = log_date_of(path.name)
         if log_date is None:
-            continue
-        if born and log_date == born:
             continue
         if (today - log_date).days > days:
             out.append(path.name)
@@ -236,7 +248,7 @@ def health(sanctum: Path, today: date | None = None) -> dict:
     tiktoken. Returns the reasons curation is due; an empty `reasons` means the
     sanctum is healthy and waking says nothing.
     """
-    today = today or date.today()
+    today = today or local_today()
 
     per_file = {}
     for name in IDENTITY_FILES:
@@ -268,7 +280,8 @@ def health(sanctum: Path, today: date | None = None) -> dict:
         )
     if memory_tokens > MEMORY_GUARDRAIL_TOKENS:
         reasons.append(
-            f"MEMORY.md is ~{memory_tokens:,} tokens against a {MEMORY_GUARDRAIL_TOKENS:,} guardrail"
+            f"MEMORY.md is ~{memory_tokens:,} tokens against a "
+            f"{MEMORY_GUARDRAIL_TOKENS:,} guardrail"
         )
     if index_bytes > INDEX_MAX_BYTES:
         reasons.append(

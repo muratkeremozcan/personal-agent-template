@@ -5,10 +5,12 @@
 """Unit tests for init-sanctum.py: scaffolding, substitution, capability discovery."""
 
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPT_PATH = SKILL_ROOT / "scripts" / "init-sanctum.py"
@@ -19,9 +21,23 @@ spec.loader.exec_module(init_sanctum)
 
 
 class InitSanctumTests(unittest.TestCase):
+    def setUp(self):
+        # init-sanctum resolves the canonical home from LOCAL_AGENT_HOME. Each test
+        # points it at its own temporary directory so no test can touch a real
+        # sanctum under ~/local-agent.
+        fallback = tempfile.TemporaryDirectory()
+        self.addCleanup(fallback.cleanup)
+        self._env = mock.patch.dict(os.environ, {"LOCAL_AGENT_HOME": fallback.name})
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
+    def use_home(self, path: Path) -> None:
+        os.environ["LOCAL_AGENT_HOME"] = str(path)
+
     def test_scaffolds_sanctum_against_real_skill_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp)
+            self.use_home(project_root)
             (project_root / "_bmad").mkdir()
             sys.argv = ["init-sanctum.py", str(project_root), str(SKILL_ROOT)]
             init_sanctum.main()
@@ -52,10 +68,12 @@ class InitSanctumTests(unittest.TestCase):
             self.assertTrue((sanctum / "scripts" / "wake.py").is_file())
             self.assertTrue((sanctum / "scripts" / "curate.py").is_file())
             self.assertFalse((sanctum / "scripts" / "init-sanctum.py").exists())
+            self.assertFalse((sanctum / "scripts" / "install_global.py").exists())
 
     def test_reads_current_toml_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp)
+            self.use_home(project_root)
             bmad = project_root / "_bmad"
             bmad.mkdir()
             (bmad / "config.toml").write_text(
@@ -76,6 +94,7 @@ class InitSanctumTests(unittest.TestCase):
     def test_second_run_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp)
+            self.use_home(project_root)
             (project_root / "_bmad").mkdir()
             sys.argv = ["init-sanctum.py", str(project_root), str(SKILL_ROOT)]
             init_sanctum.main()
@@ -87,11 +106,29 @@ class InitSanctumTests(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 0)
             self.assertEqual(marker.read_text(), "owner-edited content should survive")
 
+    def test_scaffold_lands_in_the_canonical_home_whatever_the_project_root(self):
+        with (
+            tempfile.TemporaryDirectory() as home_dir,
+            tempfile.TemporaryDirectory() as project_dir,
+        ):
+            home, project = Path(home_dir), Path(project_dir)
+            self.use_home(home)
+            (home / "_bmad").mkdir()
+            (home / "_bmad" / "config.toml").write_text('[core]\nuser_name = "Alex"\n')
+            sys.argv = ["init-sanctum.py", str(project), str(SKILL_ROOT)]
+            init_sanctum.main()
+
+            sanctum = home / "_bmad" / "memory" / "local-agent"
+            self.assertTrue((sanctum / "MEMORY.md").is_file())
+            self.assertIn("Alex", (sanctum / "BOND.md").read_text(encoding="utf-8"))
+            self.assertFalse((project / "_bmad").exists())
+
     def test_external_capability_source_formatting(self):
         with tempfile.TemporaryDirectory() as tmp:
             refs = Path(tmp)
             (refs / "ext.md").write_text(
-                "---\nname: X\ndescription: does x\ncode: XX\ntype: external\nexternal-skill: some-skill\n---\nbody\n"
+                "---\nname: X\ndescription: does x\ncode: XX\ntype: external\n"
+                "external-skill: some-skill\n---\nbody\n"
             )
             (refs / "prompt.md").write_text(
                 "---\nname: Y\ndescription: does y\ncode: YY\ntype: prompt\n---\nbody\n"

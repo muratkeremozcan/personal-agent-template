@@ -32,17 +32,23 @@ Usage:
                   awareness, but it never determines where the sanctum lives.
 """
 
+import shlex
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _sanctum import (  # noqa: E402
+from _sanctum import (
     BORN_MARKER,
     IDENTITY_FILES,
     SKILL_NAME,
     health,
     sanctum_home,
 )
+
+# Printed as an absolute path because the owner, or the agent, runs it from whatever
+# directory the session opened in. A relative `scripts/curate.py` resolves only from
+# inside the skill bundle, so the command in the notice failed as printed.
+CURATE_SCRIPT = Path(__file__).resolve().parent / "curate.py"
 
 
 def emit(path: Path) -> None:
@@ -76,7 +82,8 @@ def emit_curation_notice(sanctum: Path) -> None:
         "Do not derail what your owner asked for. If the session is a one-shot "
         "Remember or Recall, or they are mid-thread, do the pass after their "
         "work is done, and never announce it as a status report.\n"
-        f"Exact token counts: uv run scripts/curate.py {sanctum.parent.parent.parent}"
+        "Exact token counts: uv run "
+        f"{shlex.quote(str(CURATE_SCRIPT))} {shlex.quote(str(sanctum.parent.parent.parent))}"
     )
 
 
@@ -106,13 +113,15 @@ def main() -> int:
         print("MODE: FIRST_BREATH_RESUME")
         print(f"Invoked from: {project_root}")
         print(
-            f"Sanctum scaffolded at {sanctum}, but First Breath never finished (no {BORN_MARKER} marker)."
+            f"Sanctum scaffolded at {sanctum}, but First Breath never finished "
+            f"(no {BORN_MARKER} marker)."
         )
         print(
-            "You are half-born: the files exist but still hold seed placeholders, not a real self yet. "
-            "Do NOT greet as though fully formed, and do not claim a name, mission, or memory the files do "
-            "not actually contain. Load references/first-breath.md and continue the birth from where it "
-            "left off, building on whatever is already saved."
+            "You are half-born: the files exist but still hold seed placeholders, "
+            "not a real self yet. Do NOT greet as though fully formed, and do not claim "
+            "a name, mission, or memory the files do not actually contain. Load "
+            "references/first-breath.md and continue the birth from where it left off, "
+            "building on whatever is already saved."
         )
         return 0
 

@@ -4,7 +4,10 @@
 # ///
 """Unit tests for curate.py: memory guardrail, stale-log detection, index drift."""
 
+import contextlib
 import importlib.util
+import io
+import json
 import os
 import tempfile
 import unittest
@@ -68,9 +71,9 @@ class CurateTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as home,
             tempfile.TemporaryDirectory() as project,
+            mock.patch.dict(os.environ, {"LOCAL_AGENT_HOME": home}),
         ):
-            with mock.patch.dict(os.environ, {"LOCAL_AGENT_HOME": home}):
-                self.assertEqual(curate.main([project]), 1)
+            self.assertEqual(curate.main([project]), 1)
 
     def test_main_reports_returns_0(self):
         with (
@@ -93,6 +96,34 @@ class CurateTests(unittest.TestCase):
             (s / "MEMORY.md").write_text("hi")
             with mock.patch.dict(os.environ, {"LOCAL_AGENT_HOME": home}):
                 self.assertEqual(curate.main([unrelated_project]), 0)
+
+
+    def test_tokenizer_fallback_is_stated_in_the_report_and_on_stderr(self):
+        """An estimate that reads as an exact count is worse than no count."""
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as project:
+            s = self._sanctum(home)
+            (s / "MEMORY.md").write_text("hi")
+            out, err = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"LOCAL_AGENT_HOME": home}),
+                mock.patch.object(curate, "_encoder", return_value=(None, "offline")),
+                contextlib.redirect_stdout(out),
+                contextlib.redirect_stderr(err),
+            ):
+                self.assertEqual(curate.main([project]), 0)
+            report = json.loads(out.getvalue())
+            self.assertEqual(report["tokenizer"], {"method": "fallback", "reason": "offline"})
+            self.assertEqual(report["memory_md"]["method"], "fallback")
+            self.assertIn("offline", err.getvalue())
+
+    def test_index_drift_ignores_bytecode_caches_in_capabilities(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self._sanctum(tmp)
+            (s / "INDEX.md").write_text("- capabilities/real.md\n")
+            (s / "capabilities" / "real.md").write_text("listed")
+            (s / "capabilities" / "__pycache__").mkdir()
+            (s / "capabilities" / ".DS_Store").write_text("")
+            self.assertEqual(curate.index_drift(s)["unlisted"], [])
 
 
 if __name__ == "__main__":

@@ -10,18 +10,20 @@ fired because nothing was scheduled to look.
 """
 
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import _sanctum  # noqa: E402
+import _sanctum
 
 WAKE = Path(__file__).resolve().parent.parent / "wake.py"
+RETENTION = _sanctum.SESSION_RETENTION_DAYS
 
 
 def scaffold(home, *, index="", memory="", born=True):
@@ -85,20 +87,28 @@ class HealthTests(unittest.TestCase):
     def test_aged_logs_are_caught_and_first_breath_is_exempt(self):
         with tempfile.TemporaryDirectory() as home:
             sanctum = scaffold(home)
-            old = date.today() - timedelta(days=_sanctum.SESSION_RETENTION_DAYS + 5)
+            old = _sanctum.local_today() - timedelta(days=_sanctum.SESSION_RETENTION_DAYS + 5)
             (sanctum / "sessions" / f"{old.isoformat()}-topic.md").write_text("x")
             (sanctum / "sessions" / "2026-07-14.md").write_text("first breath")
-            aged = _sanctum.stale_logs(sanctum, _sanctum.SESSION_RETENTION_DAYS, date.today())
+            aged = _sanctum.stale_logs(sanctum, RETENTION, _sanctum.local_today())
             self.assertIn(f"{old.isoformat()}-topic.md", aged)
             self.assertNotIn("2026-07-14.md", aged)
+
+    def test_only_the_first_breath_log_is_exempt_on_the_birth_date(self):
+        with tempfile.TemporaryDirectory() as home:
+            sanctum = scaffold(home)
+            (sanctum / "sessions" / "2026-07-14.md").write_text("first breath")
+            (sanctum / "sessions" / "2026-07-14-second-topic.md").write_text("later that day")
+            aged = _sanctum.stale_logs(sanctum, RETENTION, _sanctum.local_today())
+            self.assertEqual(aged, ["2026-07-14-second-topic.md"])
 
     def test_fresh_logs_are_left_alone(self):
         with tempfile.TemporaryDirectory() as home:
             sanctum = scaffold(home)
-            recent = date.today() - timedelta(days=1)
+            recent = _sanctum.local_today() - timedelta(days=1)
             (sanctum / "sessions" / f"{recent.isoformat()}-topic.md").write_text("x")
             self.assertEqual(
-                _sanctum.stale_logs(sanctum, _sanctum.SESSION_RETENTION_DAYS, date.today()), []
+                _sanctum.stale_logs(sanctum, RETENTION, _sanctum.local_today()), []
             )
 
 
@@ -129,6 +139,25 @@ class WakeNoticeTests(unittest.TestCase):
             self.assertIn("references/curation-pass.md", out.stdout)
             # It must not hijack the session it fires in.
             self.assertIn("Do not derail", out.stdout)
+
+    def test_printed_curate_command_runs_from_the_project_directory(self):
+        """The notice is read and executed from wherever the session opened."""
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as project:
+            oversized = "word " * (_sanctum.MEMORY_GUARDRAIL_TOKENS * _sanctum.BYTES_PER_TOKEN)
+            scaffold(home, memory=oversized)
+            out = self.run_wake(home, project)
+            line = next(
+                ln for ln in out.stdout.splitlines() if ln.startswith("Exact token counts:")
+            )
+            script, target = shlex.split(line.split("uv run ", 1)[1])
+            self.assertTrue(Path(script).is_absolute(), script)
+            env = dict(os.environ)
+            env["LOCAL_AGENT_HOME"] = str(home)
+            ran = subprocess.run(
+                [sys.executable, script, target],
+                capture_output=True, text=True, check=False, cwd=project, env=env,
+            )
+            self.assertEqual(ran.returncode, 0, ran.stderr)
 
     def test_notice_never_fires_during_first_breath(self):
         """A newborn has nothing to curate; a nag there would be nonsense."""

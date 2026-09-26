@@ -37,9 +37,20 @@ Your memory has two layers:
 
 ### Session Logs (raw, append-only)
 
-After each session, append key notes to `sessions/YYYY-MM-DD.md`. Multiple
-sessions on the same day append to the same file. These are raw notes, not
-polished.
+After each session, write key notes to `sessions/YYYY-MM-DD-{topic}.md`, where
+the topic names your thread (`2026-07-30-adr-review.md`). These are raw notes,
+not polished.
+
+Several instances of you can run at once, in parallel windows or across repos,
+and they cannot see each other. A topic-suffixed log per thread keeps one
+instance from overwriting another's notes with a whole-file write. `curate.py`
+finds the date anywhere in the filename, so the suffix costs nothing. The one
+bare-date log is the First Breath log, `sessions/<birth-date>.md`.
+
+On the files every instance shares (MEMORY.md, INDEX.md, BOND.md,
+CAPABILITIES.md), make targeted edits against anchored text and leave the rest
+of the file untouched. Two instances editing different anchors both survive; a
+wholesale rewrite keeps only the last writer's version.
 
 Session logs are NOT loaded on waking. They exist as raw material for curation.
 
@@ -72,7 +83,7 @@ and current.
 
 Do the measuring with a script rather than by eye, since you cannot reliably
 count your own tokens or the age of a log. Run
-`uv run scripts/curate.py {project-root}` to get the exact MEMORY.md token
+`uv run {skill-root}/scripts/curate.py {project-root}` to get the exact MEMORY.md token
 count, the session logs now older than 14 days, and any drift between INDEX.md
 and what is actually in your sanctum. Reason over its numbers. The judgment
 stays yours: what to distill, merge, prune, or delete, and which aged logs to
@@ -80,7 +91,7 @@ archive and then remove.
 
 ## Where to Write
 
-- **`sessions/YYYY-MM-DD.md`**: raw session notes (append after each session)
+- **`sessions/YYYY-MM-DD-{topic}.md`**: raw session notes, one file per thread
 - **MEMORY.md**: curated long-term knowledge, work facts, decisions, patterns
 - **BOND.md**: things about your owner (preferences, style, what works and
   doesn't, explicit "remember this" asks)
@@ -94,8 +105,7 @@ of the index so you can catch the ones you missed.
 
 ## When to Write
 
-- **Session log**: at the end of every meaningful session, append to
-  `sessions/YYYY-MM-DD.md`
+- **Session log**: as the session goes, in `sessions/YYYY-MM-DD-{topic}.md`
 - **Immediately**: when your owner says something you should remember (see the
   Remember capability)
 - **End of session**: when you notice a pattern worth capturing
@@ -106,7 +116,7 @@ of the index so you can catch the ones you missed.
 
 Your sanctum loads every session. Every token costs context space for the actual
 conversation. Be ruthless about compression, and measure with
-`uv run scripts/curate.py {project-root}` rather than by eye; you cannot count
+`uv run {skill-root}/scripts/curate.py {project-root}` rather than by eye; you cannot count
 your own tokens and you will guess low.
 
 - Capture the insight, not the story
@@ -135,7 +145,7 @@ file does not stop growth; it relocates it into the files nothing measures.
 
 **You do not have to remember to do any of this.** `wake.py` runs the same checks
 on every activation and prints a **CURATION DUE** block when the sanctum crosses
-a threshold. When it does, `references/curation-pass.md` is the four-phase pass
+a threshold. When it does, `references/curation-pass.md` is the five-phase pass
 to follow. This file is the philosophy; that one is the procedure.
 
 ## Organic Growth
