@@ -24,7 +24,7 @@ jobs:
       matrix:
         # The floor is what `requires-python` in the scripts declares. The ceiling
         # catches a deprecation before it reaches anyone building on the template.
-        python-version: ["3.11", "3.13"]
+        python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -39,3 +39,15 @@ jobs:
 
       - name: Check the scripts are syntactically valid on this version
         run: python -m compileall -q skills/local-agent/scripts
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Lint
+        # Rule families are pinned in ruff.toml, so a ruff release changes nothing here
+        # until someone edits that file.
+        run: uvx ruff check .
