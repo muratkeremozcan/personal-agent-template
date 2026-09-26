@@ -7,7 +7,6 @@ redaction verifier that passes a leak is worse than no verifier, because it conv
 manual check into false confidence.
 """
 
-import json
 import os
 import subprocess
 import sys
@@ -109,57 +108,94 @@ class ArchiveRootTest(unittest.TestCase):
 
 
 class RedactionGateTest(unittest.TestCase):
-    """Every case here is one the gate must refuse. A passing leak is the failure mode."""
+    """Every case here is one the gate must refuse. A passing leak is the failure mode.
 
-    def _run(self, archived: str, withheld: str, name="2026-05-04-topic.md"):
-        with tempfile.TemporaryDirectory() as tmp:
-            a = Path(tmp) / name
-            w = Path(tmp) / "withheld.md"
-            a.write_text(archived)
-            w.write_text(withheld)
-            return subprocess.run(
-                [sys.executable, str(VERIFIER), str(a), str(w), "--quiet"],
-                capture_output=True, text=True,
-            ).returncode
+    Each run builds the layout the archive procedure writes: the note under
+    <archive>/log/YYYY/MM/ and the withheld blocks in the sanctum's sessions/redacted/
+    under the source filename, so the structural checks pass and the case under test is
+    the only thing that can fail.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.archive = root / "archive"
+        self.archive.mkdir()
+        home = root / "home"
+        self.redacted_dir = home / "_bmad" / "memory" / "local-agent" / "sessions" / "redacted"
+        self.redacted_dir.mkdir(parents=True)
+        self.env = {
+            **os.environ, "LOCAL_AGENT_HOME": str(home), "LOCAL_AGENT_ARCHIVE": str(self.archive),
+        }
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _note(self, text: str, name: str = "2026-05-04-topic.md") -> Path:
+        path = self.archive / "log" / "2026" / "05" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def _gate(self, *args) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(VERIFIER), *map(str, args)],
+            capture_output=True, text=True, check=False, env=self.env,
+        )
+
+    def _run(self, archived: str, withheld: str, name="2026-05-04-topic.md", expect=None,
+             extra=()):
+        # The slug is the sanctum filename, so `source:` follows the name under test.
+        a = self._note(archived.replace("2026-05-04-topic", Path(name).stem), name)
+        w = self.redacted_dir / name
+        w.write_text(withheld)
+        result = self._gate(a, w, "--quiet", *extra)
+        if expect is not None:
+            self.assertIn(expect, result.stderr)
+        return result.returncode
 
     WITHHELD = (
         "## Withheld from 2026-05-04-topic.md\n\n"
         "**Confidential:** Person A told Person B that Person C is leaving the company "
         "at the end of the quarter.\n"
     )
+    NOTICE = "> [!warning] Withheld from archive\n> 1 block withheld: personnel.\n"
     CLEAN = (
-        "---\ntype: session-log\ndate: 2026-05-04\nredacted: true\n---\n"
-        "# Topic\n\nOrdinary content.\n\n"
-        "> [!warning] Withheld from archive\n> 1 block withheld: personnel.\n"
+        "---\ntype: session-log\ndate: 2026-05-04\nsource: sessions/2026-05-04-topic.md\n"
+        "redacted: true\nredacted_count: 1\n---\n"
+        "# Topic\n\nOrdinary content.\n\n" + NOTICE
     )
 
     def test_clean_note_passes(self):
         self.assertEqual(self._run(self.CLEAN, self.WITHHELD), 0)
 
     def test_verbatim_leak_is_caught(self):
-        leaked = self.CLEAN + "\nPerson A told Person B that Person C is leaving the company at the end of the quarter.\n"
-        self.assertEqual(self._run(leaked, self.WITHHELD), 1)
+        leaked = self.CLEAN + (
+            "\nPerson A told Person B that Person C is leaving the company at the end of "
+            "the quarter.\n"
+        )
+        self.assertEqual(
+            self._run(leaked, self.WITHHELD, expect="withheld sentence present"), 1
+        )
 
     def test_missing_notice_is_caught(self):
         # A silent hole reads as a complete record, which is worse than a visible gap.
-        silent = self.CLEAN.replace("> [!warning] Withheld from archive\n> 1 block withheld: personnel.\n", "")
-        self.assertEqual(self._run(silent, self.WITHHELD), 1)
+        silent = self.CLEAN.replace(self.NOTICE, "")
+        self.assertEqual(self._run(silent, self.WITHHELD, expect="no reader-visible"), 1)
 
     def test_tainted_filename_is_caught(self):
         # The filename never passes through the body gate, so a slug naming the subject
         # leaks it even when every block was withheld.
         self.assertEqual(
-            self._run(self.CLEAN, self.WITHHELD, name="2026-05-04-personc-leaving.md"), 1
+            self._run(self.CLEAN, self.WITHHELD, name="2026-05-04-personc-leaving.md",
+                      expect="filename names a withheld subject"),
+            1,
         )
 
     def test_unreadable_input_fails_closed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            w = Path(tmp) / "w.md"
-            w.write_text(self.WITHHELD)
-            rc = subprocess.run(
-                [sys.executable, str(VERIFIER), str(Path(tmp) / "missing.md"), str(w)],
-                capture_output=True, text=True,
-            ).returncode
+        w = self.redacted_dir / "2026-05-04-topic.md"
+        w.write_text(self.WITHHELD)
+        rc = self._gate(self.archive / "missing.md", w).returncode
         # 2 rather than 1: a check that could not run must block the prune exactly
         # as a failing one does, and must be distinguishable from a clean pass.
         self.assertEqual(rc, 2)
@@ -172,7 +208,7 @@ class RedactionGateTest(unittest.TestCase):
                     "**Confidential:** PersonC was fired. Severance: 185000.\n")
         leaked = self.CLEAN.replace("Ordinary content.",
                                     "Ordinary content. PersonC was fired. Severance: 185000.")
-        self.assertEqual(self._run(leaked, withheld), 1)
+        self.assertEqual(self._run(leaked, withheld, expect="tokens from the withheld"), 1)
 
     def test_entity_named_only_in_withheld_block_is_caught(self):
         # Regression, and the leak this capability's own documentation calls the subtlest
@@ -182,7 +218,7 @@ class RedactionGateTest(unittest.TestCase):
                     "**Confidential:** PersonD is being managed out after a review.\n")
         note = self.CLEAN.replace("redacted: true",
                                   'people: ["[[person/PersonD]]"]\nredacted: true')
-        self.assertEqual(self._run(note, withheld), 1)
+        self.assertEqual(self._run(note, withheld, expect="persond"), 1)
 
     def test_allow_permits_a_genuine_collision(self):
         # The sweep is deliberately biased toward flagging, so an escape hatch has to exist
@@ -190,85 +226,94 @@ class RedactionGateTest(unittest.TestCase):
         withheld = ("## Withheld from 2026-05-04-topic.md\n\n"
                     "**Confidential:** PersonC was fired.\n")
         leaked = self.CLEAN.replace("Ordinary content.", "Ordinary content. PersonC was fired.")
-        with tempfile.TemporaryDirectory() as tmp:
-            a = Path(tmp) / "2026-05-04-topic.md"; a.write_text(leaked)
-            w = Path(tmp) / "withheld.md"; w.write_text(withheld)
-            rc = subprocess.run(
-                [sys.executable, str(VERIFIER), str(a), str(w),
-                 "--allow", "personc", "--allow", "fired", "--quiet"],
-                capture_output=True, text=True,
-            ).returncode
+        self.assertEqual(self._run(leaked, withheld), 1)
+        rc = self._run(leaked, withheld, extra=("--allow", "personc", "--allow", "fired"))
         self.assertEqual(rc, 0)
 
     def test_credential_shaped_value_is_caught_regardless_of_length(self):
         # Regression: `PIN: 1234` is neither long prose nor seven words, so both
         # thresholds missed it. Length was never the right axis for a secret.
-        withheld = "## Withheld from 2026-05-04-topic.md\n\n**Confidential:** Access PIN: 1234.\n"
+        withheld = ("## Withheld from 2026-05-04-topic.md\n\n"
+                    "**Confidential:** Access PIN: 1234.\n")
         leaked = self.CLEAN.replace("Ordinary content.", "Ordinary content. PIN: 1234")
-        self.assertEqual(self._run(leaked, withheld), 1)
+        self.assertEqual(
+            self._run(leaked, withheld, expect="credential-shaped value from the withheld"), 1
+        )
 
     def test_short_name_in_slug_is_caught(self):
         # Regression: a four-character floor dropped short given names, which are
         # exactly what a personnel redaction is about.
         withheld = "## Withheld from x.md\n\n**Confidential:** Amy is departing next month.\n"
-        self.assertEqual(self._run(self.CLEAN, withheld, name="2026-05-04-amy-departure.md"), 1)
+        self.assertEqual(
+            self._run(self.CLEAN, withheld, name="2026-05-04-amy-departure.md",
+                      expect="filename names a withheld subject"),
+            1,
+        )
 
     def test_concatenated_slug_is_caught(self):
         # Regression: `personc-leaving` tokenises to "personc", matching neither
         # "person" nor "c", so a subject travelled through by concatenation.
         withheld = "## Withheld from x.md\n\n**Confidential:** Person C is leaving.\n"
-        self.assertEqual(self._run(self.CLEAN, withheld, name="2026-05-04-personc-leaving.md"), 1)
+        self.assertEqual(
+            self._run(self.CLEAN, withheld, name="2026-05-04-personc-leaving.md",
+                      expect="filename names a withheld subject"),
+            1,
+        )
 
     def test_non_latin_slug_is_caught(self):
         # Regression: an ASCII tokeniser saw nothing in a CJK filename. Scripts with
         # no case system always qualify as entities, because case cannot rule them out.
-        withheld = "## Withheld from x.md\n\n**Confidential:** 山田 was dismissed.\n"
-        self.assertEqual(self._run(self.CLEAN, withheld, name="2026-05-04-山田-dismissal.md"), 1)
+        withheld = "## Withheld from x.md\n\n**Confidential:** \u5c71\u7530 was dismissed.\n"
+        self.assertEqual(
+            self._run(self.CLEAN, withheld, name="2026-05-04-\u5c71\u7530-dismissal.md",
+                      expect="filename names a withheld subject"),
+            1,
+        )
 
     def test_common_word_does_not_fail_a_clean_slug(self):
         # The other direction, and just as important: a gate that fails ordinary
-        # archives gets bypassed, which is a security outcome rather than a usability one.
+        # archives gets bypassed, which is a security outcome as much as a usability one.
         withheld = "## Withheld from x.md\n\n**Confidential:** PersonD left the team.\n"
         self.assertEqual(self._run(self.CLEAN, withheld, name="2026-05-04-team-update.md"), 0)
 
     def test_block_scalar_source_is_checked(self):
         # Regression: a line-prefix check never saw `source: >-` with the value on the
         # following line, so a subject rode through valid YAML.
-        withheld = "## Withheld from x.md\n\n**Confidential:** Project Nightingale closes Friday.\n"
+        withheld = ("## Withheld from x.md\n\n"
+                    "**Confidential:** Project Nightingale closes Friday.\n")
         note = self.CLEAN.replace(
             "redacted: true",
             "source: >-\n  sessions/2026-05-04-nightingale-close.md\nredacted: true")
-        self.assertEqual(self._run(note, withheld), 1)
+        self.assertEqual(
+            self._run(note, withheld, expect="provenance field names a withheld subject"), 1
+        )
 
     def test_hidden_notice_does_not_satisfy_the_visible_rule(self):
         # Regression: an HTML comment renders as nothing, so it is not a notice.
-        hidden = self.CLEAN.replace(
-            "> [!warning] Withheld from archive\n> 1 block withheld: personnel.\n",
-            "<!-- Withheld from archive -->\n")
-        self.assertEqual(self._run(hidden, self.WITHHELD), 1)
+        hidden = self.CLEAN.replace(self.NOTICE, "<!-- Withheld from archive -->\n")
+        self.assertEqual(self._run(hidden, self.WITHHELD, expect="no reader-visible"), 1)
+
+    def test_fenced_notice_does_not_satisfy_the_visible_rule(self):
+        fenced = self.CLEAN.replace(self.NOTICE, "```\n" + self.NOTICE + "```\n")
+        self.assertEqual(self._run(fenced, self.WITHHELD, expect="no reader-visible"), 1)
+
+    CLEAN_LOG = (
+        "---\ntype: session-log\ndate: 2026-05-04\nsource: sessions/2026-05-04-topic.md\n"
+        "redacted: false\n---\n# Topic\n\nNothing withheld here.\n"
+    )
 
     def test_clean_log_verifies_without_a_redacted_file(self):
         # A log with nothing withheld had no redacted file, so the mandatory step could
         # not run and was skipped in practice. A skipped step is the escape a missed
-        # redaction needs, so the clean case asserts rather than exempts.
-        note = ("---\ntype: session-log\ndate: 2026-05-04\nredacted: false\n---\n"
-                "# Topic\n\nNothing withheld here.\n")
-        with tempfile.TemporaryDirectory() as tmp:
-            a = Path(tmp) / "2026-05-04-topic.md"; a.write_text(note)
-            rc = subprocess.run(
-                [sys.executable, str(VERIFIER), str(a), "--no-withheld", "--quiet"],
-                capture_output=True, text=True).returncode
+        # redaction needs, so the clean case asserts its claim explicitly.
+        rc = self._gate(self._note(self.CLEAN_LOG), "--no-withheld", "--quiet").returncode
         self.assertEqual(rc, 0)
 
     def test_clean_claim_contradicted_by_frontmatter_fails(self):
-        note = ("---\ntype: session-log\ndate: 2026-05-04\nredacted: true\n---\n"
-                "# Topic\n\nBody.\n")
-        with tempfile.TemporaryDirectory() as tmp:
-            a = Path(tmp) / "2026-05-04-topic.md"; a.write_text(note)
-            rc = subprocess.run(
-                [sys.executable, str(VERIFIER), str(a), "--no-withheld", "--quiet"],
-                capture_output=True, text=True).returncode
-        self.assertEqual(rc, 1)
+        note = self.CLEAN_LOG.replace("redacted: false", "redacted: true")
+        result = self._gate(self._note(note), "--no-withheld", "--quiet")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("`redacted: true` but no redacted file", result.stderr)
 
     def test_empty_withheld_file_fails_closed(self):
         # An empty redacted file means the withheld material was lost. Passing here

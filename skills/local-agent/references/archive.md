@@ -26,7 +26,7 @@ are the files whose filename date is past the retention threshold, First Breath 
 exemption lives in `stale_logs()` in `scripts/_sanctum.py` and reads the `.born` marker, so it holds
 whatever date the sanctum was born on).
 
-the owner can also invoke it directly: "archive that log", "archive everything before August", "put the
+The owner can also invoke it directly: "archive that log", "archive everything before August", "put the
 last quarter's planning notes in the archive." Direct invocation runs the same gate in the same order. Nothing about
 being asked by name relaxes the redaction rules.
 
@@ -59,9 +59,9 @@ apart.
 The slug, the `source` frontmatter value, and the path printed inside the withheld notice are three
 verbatim copies of the sanctum filename, and none of them passes through the body gate. A log named
 `sessions/YYYY-MM-DD-person-departure.md` therefore announces its own subject from the archive path,
-the frontmatter and the notice, three times over, while the body shows nothing at all. This is not
-hypothetical: real sanctum filenames already carry colleagues' names, and
-`sessions/YYYY-MM-DD-colleague-name-topic.md` is one of them.
+the frontmatter and the notice, three times over, while the body shows nothing at all. It happens in
+practice: real sanctum filenames carry colleagues' names, in the shape
+`sessions/YYYY-MM-DD-colleague-name-topic.md`.
 
 Run the filename-derived slug through the same personnel and marker checks the body gets, before
 anything is written. When it passes, proceed as above. When it fails:
@@ -71,7 +71,7 @@ anything is written. When it passes, proceed as above. When it fails:
   survives that describes the log, `2026-08-01-withheld`.
 - Set `source_withheld: true` in the frontmatter and omit `source` entirely. Provenance still exists
   in `sessions/redacted/`, which never leaves the machine.
-- Print the category and the date in the withheld notice, never the original path.
+- Print only the category and the date in the withheld notice.
 - Say so in the report. A renamed slug is something the owner should see, because it means a filename they
   chose was carrying something it should not have.
 
@@ -121,17 +121,17 @@ no such file, because what counts as a person, a theme or a repository is deploy
 Without one, derive the lists from the entity notes that already exist in the archive and from the
 names appearing in the log itself. Either way the shape is the same:
 
-- **people** — the keys under `people`, matched on the key or any of its `aliases`. Link target is
+- **people**: the keys under `people`, matched on the key or any of its `aliases`. Link target is
   `person/<Name>`, using the taxonomy key's exact capitalisation so every spelling and nickname of one person
   lands on one node.
-- **themes** — the keys under `themes`, matched by that entry's own `patterns` regexes against the
+- **themes**: the keys under `themes`, matched by that entry's own `patterns` regexes against the
   archived text. Link target is `theme/<slug>`, the taxonomy key verbatim.
-- **repos** — the repository name from any GitHub URL in the body, or from a bare repo name that
+- **repos**: the repository name from any GitHub URL in the body, or from a bare repo name that
   matches one already carrying an entity stub. Link target is `repo/<name>`, **except for any name
-  listed under `repo_collisions`, which takes `repo/<org>-<name>`**. Three names exist under two
-  orgs each, so a bare `[[repo/authentication-service]]` resolves to nothing and merges two
-  different repositories into one phantom node. Both archive generators already read that key; Archive
-  reads the same key or it silently disagrees with them.
+  listed under `repo_collisions`, which takes `repo/<org>-<name>`**. When one repository name
+  exists under two orgs, a bare `[[repo/<name>]]` resolves to nothing and merges two different
+  repositories into one phantom node. Every tool that writes archive links reads that same key, or
+  the tools silently disagree about which node a repository is.
 
 A name that is absent from the taxonomy stays in the prose and out of the frontmatter. An unresolved
 `[[person/Someone]]` puts a person on the graph that the archive cannot explain, which is a disclosure.
@@ -153,7 +153,7 @@ Append the guarded block so the edges exist regardless of how the build treats f
 ```
 
 The block carries exactly the same entities as the frontmatter, computed from the same redacted
-text. Any entity that reaches one and not the other is a bug, and the read-back in step 5 checks it.
+text. Any entity that reaches one and not the other is a bug, and the read-back in step 7 checks it.
 
 If the deployment runs a separate tool that maintains these blocks across the archive, check
 whether it excludes `log/` from its scan; the reference implementation does. Where it is excluded,
@@ -210,9 +210,12 @@ these tokens, matched case-insensitively:
 `do not put in` · `do not surface` · `never surface` · `off the record` · `keep this between` ·
 `keep it confidential` · `in confidence` · `private` · `sensitive` · `internal only` · `nda` ·
 `under embargo` · `unannounced` · `between us` · `stays between` · `don't tell` · `do not tell` ·
-`keep this quiet` · `not to be shared` · `off books`
+`keep this quiet` · `not to be shared` · `off books` · `eyes only`
 
-**This list is illustrative and never exhaustive.** Any phrasing that implies the writer expected the
+`scripts/verify_archive_redaction.py` scans the archived note for exactly these tokens, so the list
+above and its `PREFIX_MARKERS` stay identical; change both together.
+
+**This list is illustrative. It is a floor.** Any phrasing that implies the writer expected the
 material to stay put counts as a marker, whether or not its words appear above. "A colleague said this
 stays between us: the second office may close" carries no token from an earlier version of this
 list, names no individual against a personnel topic, and is no credential. It is still marked. When a
@@ -238,16 +241,20 @@ reach out personally afterwards. Noted here only for continuity; never surface i
 deck, or any message to a third party.
 ```
 
-Note that no two sources describe the real block the same way. Earlier drafts of
-In one real deployment, two separate documents each cited a marked block as reading
-"Confidential, never repeat", a paraphrase of a string that exists nowhere on disk. Match on tokens
-for exactly this reason. A gate built to match the quoted phrase would have let the only real
+No two sources describe a real marked block the same way. In one real deployment, two separate
+documents each cited a marked block as reading "Confidential, never repeat", a paraphrase of a
+string that exists nowhere on disk. Match on tokens for exactly this reason. A gate built to match the quoted phrase would have let the only real
 instance in the sanctum through untouched.
 
 Also treat a block as marked when a marker phrase appears mid-sentence inside it: "asked them to keep
 it confidential", "never surface in", "he told me privately", "this stays between us", "don't tell
 anyone", "keep this quiet", "not to be shared". The real example carries three such phrases in four
-lines. These are examples of a shape rather than a lookup table; match the intent.
+lines. These are examples of a shape; match the intent. The verifier treats every token in the list
+above as a marker wherever it sits in a sentence, plus "told me privately" and "told us privately".
+Bare `private` and `sensitive` count only in the prefix, because ordinary prose uses them ("the
+private repo", "sensitive data"). Markers inside HTML comments and code fences count too, since they
+sync with the file whether or not they render. A note that uses a marker phrase in ordinary prose
+fails the check; reword the line or withhold it.
 
 **What gets withheld is the whole block**, defined by where the marker sits:
 
@@ -268,8 +275,7 @@ lines. These are examples of a shape rather than a lookup table; match the inten
   other rule catches it either and it archives to a git-backed, possibly replicated store.
 
   Test for it by stripping the marker span from its line. When what remains is empty, or punctuation
-  and nothing else, the marker is a label for what follows rather than a prefix to its own sentence,
-  so extend the scope to the next heading.
+  and nothing else, the marker labels what follows, so extend the scope to the next heading.
 - A marker in a list item withholds that item, its indented continuation lines, and everything
   nested under it.
 - A marker on a heading, or on the first line under a heading, withholds the entire section: the
@@ -295,7 +301,7 @@ A named individual means any person's proper name, which includes every key and 
 in the deployment's taxonomy file, if it has one, plus any other given name or full name appearing in the log. Company
 names, product names and team names are not people.
 
-The gate protects third parties. the owner's own level, compensation, promotion case and job-security
+The gate protects third parties. The owner's own level, compensation, promotion case and job-security
 thread are the owner's own record in their own archive, and they archive normally.
 
 Org-level facts with no individual attached archive normally too: "the TA role is being phased out
@@ -315,16 +321,18 @@ see that something is missing will conclude the record is complete.
 ```
 
 Set `redacted: true` and `redacted_count: N` in the frontmatter so a query or a grep can list every
-archived note carrying an omission without opening any of them.
+archived note carrying an omission without opening any of them. `N` equals the sum of the counts in
+the notices. A note with nothing withheld states `redacted: false`, so the clean claim is explicit
+and checkable.
 
 The category comes from this closed vocabulary, and the notice carries the category and nothing
 else:
 
-- `personnel` — termination, hiring, performance, discipline
-- `compensation` — pay, equity, level, band
-- `third-party-private` — health, family, immigration, personal circumstances
-- `security` — credentials, tokens, keys, private endpoints
-- `marked-confidential` — carried a marker, topic not otherwise classified
+- `personnel`: termination, hiring, performance, discipline
+- `compensation`: pay, equity, level, band
+- `third-party-private`: health, family, immigration, personal circumstances
+- `security`: credentials, tokens, keys, private endpoints
+- `marked-confidential`: carried a marker, topic not otherwise classified
 
 Never name the person and never restate the specific detail. "1 block withheld: personnel" is
 legible. A notice naming the person and the event, in the shape "1 block withheld: [Person C]'s
@@ -333,23 +341,26 @@ the copy that syncs off the machine.
 
 ### What the automated gate cannot do
 
-The gate matches text. It catches a withheld sentence reproduced, a long word run that
-survived light rewording, a credential-shaped value, and an entity name reaching the filename
-or the frontmatter. It does **not** understand meaning.
+The gate matches text. It catches a withheld sentence reproduced (with or without its label, and
+through changes to punctuation, case, emphasis, diacritics, look-alike letters and invisible
+characters), a long word run that survived light rewording, a credential-shaped value, a
+confidentiality marker left in the note, an entity name reaching the filename or the frontmatter,
+and, with `--source`, a source sentence that reached neither the note nor the redacted file. It
+matches text only and has no model of meaning.
 
 A review demonstrated the gap by archiving "Leadership plans Friday cancellation for
 Nightingale; Jordan employment will end" against withheld text saying Nightingale would be
 cancelled on Friday and Jordan dismissed. Every fact survived, no phrase did, and the gate
 passed it.
 
-Nothing in a text comparison closes that, so it is a standing limitation rather than a bug
-awaiting a fix. Two consequences, both binding:
+Nothing in a text comparison closes that, so it is a standing limitation. Two consequences, both
+binding:
 
-- **The gate is a floor, never a clearance.** A pass means no textual leak was found. It is
-  not a statement that the archived note is safe to publish.
+- **The gate is a floor.** A pass means no textual leak was found, and says nothing about whether
+  the archived note is safe to publish.
 - **Rewriting a withheld block in your own words is a redaction failure**, however different
-  the wording. The rule is to withhold the block, not to paraphrase it. When a summary of a
-  withheld topic seems necessary, it goes in the notice as a category and nothing more.
+  the wording. The rule is to withhold the block whole. When a summary of a withheld topic seems
+  necessary, it goes in the notice as a category and nothing more.
 
 Where semantic equivalence is uncertain, fail closed and ask the owner. That is the branch
 below, and this is the case it exists for.
@@ -370,7 +381,10 @@ the owner what happened.
   endpoints, session identifiers. Withhold under `security` with no further analysis. An agent's own
   `CAPABILITIES.md` tends to accumulate exactly this, because recording how to reach a service is
   useful and recording the credential alongside it is the path of least resistance. Assume the
-  material is present rather than checking, and spend one rule on it.
+  material is present and spend one rule on it. The verifier fails a note carrying a known token
+  shape (Slack, GitHub, GitLab, OpenAI and Anthropic keys, AWS access keys, Google API keys, JWTs,
+  private key blocks, bearer tokens, cookie headers, token and credential file paths) and names
+  the shape and line without printing the value.
 - **Nothing is deleted before it is shown.** Report the withheld list to the owner, by file and category,
   before any sanctum log is pruned. They are the only one who can tell you a withheld block was fine
   or a passed block was not.
@@ -405,8 +419,25 @@ The sequence is the safety property. Run it in this order and never compress it.
 6. Write the archive note: frontmatter computed from the redacted text, body, withheld notices, Linked
    block.
 7. Read the archive note back and confirm the withheld strings are absent from it, and that the slug,
-   `source` and notices carry nothing the gate withheld. Run
-   `uv run scripts/verify_archive_redaction.py <archive-note> <redacted-file>` and require exit 0.
+   `source` and notices carry nothing the gate withheld. Then run the verifier and require exit 0:
+
+   ```sh
+   uv run scripts/verify_archive_redaction.py <archive-note> <redacted-file> --source <source-log>
+   ```
+
+   When nothing was withheld there is no redacted file, so pass `--no-withheld` in its place:
+   `uv run scripts/verify_archive_redaction.py <archive-note> --no-withheld --source <source-log>`.
+   The note must then state `redacted: false`.
+
+   `--source` names the log step 9 is about to prune. With it, the script confirms every sentence
+   of that log survives in the archive note or in the redacted file, and that every redacted
+   sentence occurs verbatim in the log. A withheld block that never reached `sessions/redacted/`
+   is caught here, before step 9 destroys it. The script also fails on a confidentiality marker or
+   credential shape left in the note, a note outside `<archive>/log/YYYY/MM/` or with a slug that
+   does not start with its `date`, frontmatter carrying both or neither of `source` and
+   `source_withheld`, a redacted file not named after the source, and notices or `redacted_count`
+   that disagree. Exit 1 means roll back the archive. Exit 2 means the check could not run, which
+   blocks the prune exactly like a failure.
 8. Rewrite the INDEX.md entry to point at the archive path. Report to the owner: what archived, what was
    withheld and under which category, what was held back entirely, and any slug that was renamed.
 9. Only now prune the source log from `sessions/`.
