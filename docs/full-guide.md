@@ -305,7 +305,7 @@ Python 3.10 is the oldest version the scripts support, and `uv` downloads it whe
 Stock macOS `python3` is 3.9, which fails the suite.
 
 CI runs the same command on Ubuntu and macOS with Python 3.10 and 3.15.
-It also runs every lifecycle script through `uv run` the way a user does, `uvx ruff check .`, and an offline check of the relative links in the docs.
+It also runs `init-sanctum.py`, `wake.py`, `curate.py` and `verify_archive_redaction.py` through `uv run` the way a user does, `uvx ruff check .`, and an offline check of the relative links in the docs.
 
 The suite verifies:
 
