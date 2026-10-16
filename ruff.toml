@@ -1,9 +1,10 @@
 # Repo-level ruff configuration.
 #
-# Pinning the rule set keeps lint reproducible on every machine. Without a config file
-# ruff applies whatever default set the installed version ships, and that set changes
-# between releases. Every rule family below is named explicitly, so a ruff upgrade
-# changes nothing until someone edits this file.
+# Lint floats with ruff on purpose. CI runs the newest ruff through `uvx`, and every rule
+# family selected below gains each new stable rule as ruff ships it, so a ruff release can
+# surface new findings with this file unchanged. Fix them when they appear. Naming the
+# families keeps the scope explicit; without this file ruff falls back to its own default
+# set.
 
 # Matches `requires-python` in the scripts' inline metadata.
 target-version = "py310"
