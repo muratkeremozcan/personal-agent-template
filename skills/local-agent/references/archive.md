@@ -215,6 +215,7 @@ these tokens, matched case-insensitively:
 
 `confidential` also matches `confidentially` and `confidentiality`.
 Hyphens and dashes read as spaces, so `Off-the-record` and `internal–only` match `off the record` and `internal only`.
+Typographic apostrophes read as `'`, so `Don’t share` matches `don't share`.
 
 `scripts/verify_archive_redaction.py` scans the archived note for exactly these tokens.
 The list above and its `PREFIX_MARKERS` stay identical, and a test compares them; change both together.
@@ -256,8 +257,10 @@ anyone", "keep this quiet", "not to be shared". The real example carries three s
 lines. These are examples of a shape; match the intent.
 The verifier treats every token in the list above as a marker wherever it sits in a sentence, plus "told" or "said" followed within three words by "privately" ("told me privately", "told Dana privately", "said privately").
 Bare `private`, `sensitive` and `secret` count only in the prefix, because ordinary prose uses them ("the private repo", "sensitive data", "rotated the client secret").
+Inside a snake_case identifier they mark nothing, so `client_secret:` and `private_key_path:` are configuration keys.
+A heading is its own prefix, so `## Private` marks the section beneath it.
 Markers inside HTML comments and code fences count too, since they sync with the file whether or not they render.
-So do markers in frontmatter values: a `summary:` that opens "Confidential, do not share:" fails exactly like the same line in the body.
+So do markers in frontmatter: a `summary:` that opens "Confidential, do not share:" fails exactly like the same line in the body, and a key is the prefix of its value, so `confidential:`, `"private":` and a nested `sensitive:` fail too.
 A note that uses a marker phrase in ordinary prose fails the check; reword the line or withhold it.
 
 **What gets withheld is the whole block**, defined by where the marker sits:
@@ -390,6 +393,10 @@ the owner what happened.
   material is present and spend one rule on it.
   The verifier fails a note carrying a known credential shape and names the shape and line without printing the value.
   The shapes: Slack tokens and webhooks; GitHub, GitLab, npm and PyPI tokens; OpenAI, Anthropic, Stripe and Google API keys; AWS access key IDs (`AKIA` and `ASIA`) and secret access keys; JWTs; private key blocks; bearer tokens and `Authorization: Basic` headers; cookie headers; URLs carrying a password (`postgres://user:password@host`); labelled `password`, `passwd`, `pwd`, `passcode`, `secret`, `api_key` and `client_secret` assignments; and token and credential file paths.
+  Labels and header names match in prose, env, JSON and YAML spelling, quoted or not, and a YAML block scalar (`password: >-` with the value on the next line) is read with its label.
+  Any labelled value counts, a multiword passphrase included.
+  Two narrow exceptions keep accurate configuration excerpts archivable: a value that is only a YAML null (`api_key: null`) or only an environment variable reference (`password = "${DATABASE_PASSWORD}"`), and a value after `:` that opens with a status word ("Password: reset by IT on Friday", `CREDENTIAL_STATUS_WORDS` in the script).
+  A quoted `"null"` and a reference with a default (`${DATABASE_PASSWORD:-hunter2}`) still count.
 - **Nothing is deleted before it is shown.** Report the withheld list to the owner, by file and category,
   before any sanctum log is pruned. They are the only one who can tell you a withheld block was fine
   or a passed block was not.

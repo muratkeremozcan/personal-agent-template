@@ -164,21 +164,39 @@ PRIVATELY_LABEL = "told or said ... privately"
 
 # Hyphens and dashes read as spaces for marker matching, so "Off-the-record" and
 # "internal\u2011only" meet "off the record" and "internal only".
+# A quote mark that is not an apostrophe inside a word.
+QUOTE_MARK = re.compile(r"""(?<![^\W_])'|'(?![^\W_])|["]""")
+
 DASHES = re.compile("[-\u2010-\u2015\u2212\ufe58\ufe63\uff0d]")
 
-# Labelled secret assignments. `=` is code or env syntax and any value counts. After `:`
-# the value counts when it carries a digit or a symbol, or stands alone at the end of the
-# line, so a prose label such as "Password: reset by IT on Friday" is not a credential.
+# Labelled secret assignments, in prose, env, YAML and JSON spelling. Any value of four or
+# more characters counts, a multiword passphrase included, with two narrow exceptions.
+# A value that is only syntax holds no secret: a YAML typed null (`api_key: null`) or a
+# bare environment variable reference (`password = "${DATABASE_PASSWORD}"`). A quoted
+# "null" is a string and still counts. After `:` a value opening with a status word is a
+# note about the credential: "Password: reset by IT on Friday".
 _SECRET_LABEL = (
     r"(?:\b|(?<=_))"
     r"(?:password|passwd|pwd|passcode|secret(?:[_-]?key)?|api[_-]?key|client[_-]?secret)\b"
+    r"""[*_"'`]*\s*"""
 )
+_SYNTAX_ONLY = r"""(?:(?:null|~)|["'`]?\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)["'`]?)[,;]?\s*$"""
+CREDENTIAL_STATUS_WORDS = (
+    "reset", "rotated", "changed", "updated", "expired", "expires", "revoked", "removed",
+    "stored", "saved", "kept", "managed", "shared", "required", "needed", "missing",
+    "unknown", "pending", "tbd", "none", "n/a", "see", "in", "via", "from", "at", "on",
+    "ask", "check", "use", "is", "was", "are", "were", "will", "has", "had", "needs",
+    "must", "should", "not", "no",
+)  # fmt: skip
+_STATUS = r"(?:" + "|".join(re.escape(w) for w in CREDENTIAL_STATUS_WORDS) + r")\b"
 _SECRET_VALUE = (
-    r"""(?:[*_"'`]*\s*=\s*["'`]?[^\s"'`]{4,}"""
-    r"""|[*_"'`]*\s*:[*_\s]*["'`]?"""
-    r"""(?:(?=[^\s"'`]{6,})[^\s"'`]*[0-9!@#$%^&*+=~?<>{}\[\];|\\][^\s"'`]*"""
-    r"""|[^\s"'`]{4,}["'`]?\s*$))"""
+    rf"""(?:=\s*(?!{_SYNTAX_ONLY})["'`]?[^\s"'`]{{4,}}"""
+    rf"""|:[*_\s]*(?!{_SYNTAX_ONLY})(?!["'`]?{_STATUS})["'`]?[^\s"'`]{{4,}})"""
 )
+
+# A YAML block scalar indicator at the end of a line: the value sits on the indented lines
+# that follow, so a per-line scan sees the label and the secret apart.
+BLOCK_SCALAR = re.compile(r":[ \t]*[|>][-+]?\d*[ \t]*$")
 
 # Shapes the fail-closed rule withholds under `security` with no further analysis. The
 # failure message names the shape and the line number only, never the value.
@@ -209,7 +227,9 @@ CREDENTIAL_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("bearer token", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*")),
     (
         "basic auth header",
-        re.compile(r"\bauthorization:\s*basic\s+[A-Za-z0-9+/]{8,}=*", re.IGNORECASE),
+        re.compile(
+            r"""\bauthorization["']?\s*:\s*["']?basic\s+[A-Za-z0-9+/]{8,}=*""", re.IGNORECASE
+        ),
     ),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
     (
@@ -224,7 +244,7 @@ CREDENTIAL_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
         "oauth token or credentials file path",
         re.compile(r"[\w~./-]*(?:token|credential)s?\.json\b", re.IGNORECASE),
     ),
-    ("cookie header", re.compile(r"\bcookie:\s*\S{16,}", re.IGNORECASE)),
+    ("cookie header", re.compile(r"""\bcookie["']?\s*:\s*["']?\S{16,}""", re.IGNORECASE)),
 )
 
 SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n{2,}")
@@ -280,6 +300,7 @@ FM_LIST_ITEM = re.compile(r"^\s+-\s+(.*)$")
 
 LINE_LEAD = re.compile(r"^[\s>]*(?:(?:[-*+]|\d+[.)])\s+)?(?:#{1,6}\s+)?")
 BOLD_SPAN = re.compile(r"^(?:\*\*|__)(.+?)(?:\*\*|__)")
+HEADING = re.compile(r"^[ \t>]*#{1,6}[ \t]+(.+?)[ \t#]*$")
 
 # Characters that hide a leak from a byte comparison while leaving it readable: zero-width
 # joiners and spaces, word joiner, soft hyphen, and the byte-order mark.
@@ -301,7 +322,7 @@ CONFUSABLES = str.maketrans(
         "\u0391": "a", "\u0392": "b", "\u0395": "e", "\u0396": "z", "\u0397": "h",
         "\u0399": "i", "\u039a": "k", "\u039c": "m", "\u039d": "n", "\u039f": "o",
         "\u03a1": "p", "\u03a4": "t", "\u03a5": "y", "\u03a7": "x",
-        "\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"',
+        "\u2019": "'", "\u2018": "'", "\u02bc": "'", "\u2032": "'", "\u201c": '"', "\u201d": '"',
     }
 )  # fmt: skip
 
@@ -331,8 +352,9 @@ def shingles(tokens: list[str], n: int) -> set[tuple[str, ...]]:
 def split_label(text: str) -> tuple[str, str]:
     """Split a line or sentence into the span the marker rule inspects and the rest.
     The span is, after leading whitespace, quote markers, bullets and heading hashes,
-    the first bold span or the first clause up to a colon. Both parts are empty strings
-    when the text has neither."""
+    the first bold span or the first clause up to a colon. A heading with neither is its
+    own label, so `## Private` marks the section beneath it. Both parts are empty strings
+    when the text has none of these."""
     stripped = LINE_LEAD.sub("", text, count=1)
     bold = BOLD_SPAN.match(stripped)
     if bold:
@@ -340,6 +362,10 @@ def split_label(text: str) -> tuple[str, str]:
     if ":" in stripped[:80]:
         label, _, rest = stripped.partition(":")
         return label, rest
+    first, _, rest = text.partition("\n")
+    heading = HEADING.match(first)
+    if heading:
+        return heading.group(1), rest
     return "", ""
 
 
@@ -553,8 +579,29 @@ ANYWHERE_MARKER_RE = marker_regex(ANYWHERE_MARKERS)
 
 
 def marker_text(text: str) -> str:
-    """Text as the marker rule reads it: normalised, with hyphens and dashes as spaces."""
-    return re.sub(r"\s+", " ", DASHES.sub(" ", normalize(text))).strip()
+    """Text as the marker rule reads it: normalised, with hyphens, dashes and quote marks
+    as spaces. An apostrophe inside a word stays, so "don't" still reads as one word, and
+    a quoted YAML key such as `'confidential':` reads as the bare word."""
+    text = QUOTE_MARK.sub(" ", DASHES.sub(" ", normalize(text)))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# An underscore inside a snake_case identifier. `client_secret:` and `private_key:` are
+# configuration keys, so a prefix-only marker word inside one marks nothing.
+SNAKE_JOIN = re.compile(r"(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])")
+
+
+def prefix_marker(label: str) -> str | None:
+    """The marker a prefix label carries, or None. A prefix-only word counts when it
+    stands as a word of its own, outside any snake_case identifier."""
+    if not label:
+        return None
+    joined = {m.group(0) for m in PREFIX_MARKER_RE.finditer(marker_text(SNAKE_JOIN.sub("", label)))}
+    for hit in PREFIX_MARKER_RE.finditer(marker_text(label)):
+        phrase = re.sub(r"\s+", " ", hit.group(0))
+        if phrase not in PREFIX_ONLY_MARKERS or phrase in joined:
+            return phrase
+    return None
 
 
 def mask(text: str, generic: bool = True) -> str:
@@ -984,23 +1031,27 @@ def check_markers(a: Archive) -> None:
     marker that survives means the gate missed a block, whatever the redacted file says.
     Markers inside comments and code still count: they are in the file that syncs,
     rendered or not. A review put "Confidential, do not share: ..." in a `summary:` value
-    while this read the body only."""
+    while this read the body only, and then `confidential: <the secret>` while this read
+    values only. A frontmatter key is the prefix label of its value, in any YAML spelling:
+    quoted, nested, or holding a block scalar."""
     # (file line, text) pairs. Line 1 is the opening `---`.
     fm_values: list[tuple[int, str]] = []
     line_no = 2
     for key, values, raw in frontmatter_entries(a.fm_lines):
         fm_values += [(line_no, v) for v in values] if key is not None else [(line_no, raw[0])]
         line_no += len(raw)
+    fm_raw = [(i + 2, line) for i, line in enumerate(a.fm_lines)]
     body_start = len(a.fm_lines) + 3
     body_lines = strip_notices(a.body).split("\n")
     body = [(body_start + i, line) for i, line in enumerate(body_lines)]
 
-    for line_no, text in fm_values + body:
-        label = marker_text(split_label(text)[0])
-        hit = PREFIX_MARKER_RE.search(label) if label else None
-        if hit:
+    prefix_reported: set[tuple[int, str]] = set()
+    for line_no, text in fm_raw + fm_values + body:
+        hit = prefix_marker(split_label(text)[0])
+        if hit and (line_no, hit) not in prefix_reported:
+            prefix_reported.add((line_no, hit))
             a.fail(
-                f"confidentiality marker {hit.group(0)!r} in the prefix of line {line_no}; "
+                f"confidentiality marker {hit!r} in the prefix of line {line_no}; "
                 "the whole block must be withheld"
             )
 
@@ -1026,10 +1077,22 @@ def check_markers(a: Archive) -> None:
 
 def check_credentials(a: Archive) -> None:
     """Credential shapes anywhere in the note, frontmatter included. The failure names
-    the shape and the line, never the value."""
-    for line_no, line in enumerate(a.note_raw.split("\n"), start=1):
+    the shape and the line, never the value. A YAML block scalar (`password: >-` with the
+    value indented below) is read as one line, label and value together."""
+    lines = a.note_raw.split("\n")
+    for i, line in enumerate(lines):
+        candidate = line
+        if BLOCK_SCALAR.search(line):
+            indent = len(line) - len(line.lstrip())
+            value = []
+            for follow in lines[i + 1 :]:
+                if follow.strip() and len(follow) - len(follow.lstrip()) <= indent:
+                    break
+                value.append(follow.strip())
+            candidate = BLOCK_SCALAR.sub(": ", line) + " ".join(v for v in value if v)
+        line_no = i + 1
         for shape, pattern in CREDENTIAL_SHAPES:
-            if pattern.search(line):
+            if pattern.search(candidate):
                 a.fail(
                     f"credential-shaped value ({shape}) on line {line_no}; withhold under "
                     "`security`"

@@ -487,6 +487,9 @@ class MarkerTests(GateTestCase):
             "secret label": f"**Secret:** {secret}",
             "told a name privately": f"Omar told Dana privately that {secret}",
             "said privately": f"Omar said privately that {secret}",
+            "curly apostrophe don't share": f"Don\u2019t share: {secret}",
+            "curly apostrophe don't repeat": f"Don\u2019t repeat this: {secret}",
+            "modifier apostrophe": f"Don\u02bct share: {secret}",
             "told a cyrillic name privately": (
                 f"Omar told \u0414\u0430\u043d\u0430 privately that {secret}"
             ),
@@ -533,6 +536,59 @@ class MarkerTests(GateTestCase):
             self.gate(self.note(text), source=self.source(source)), "confidentiality marker"
         )
 
+    def test_frontmatter_key_is_a_prefix_label(self):
+        # The marked paragraph moved into a property whose key is the marker. Its words
+        # sit in the note, so the source check passes, and only the key gives it away.
+        secret = "The Zephyr acquisition closes Friday."
+        # label: (frontmatter field, the line carrying the marker key)
+        cases = {
+            "confidential": (f"confidential: {secret}\n", "confidential:"),
+            "private": (f"private: {secret}\n", "private:"),
+            "sensitive": (f"sensitive: {secret}\n", "sensitive:"),
+            "secret": (f"secret: {secret}\n", "secret:"),
+            "quoted key": (f'"private": "{secret}"\n', '"private":'),
+            "single-quoted key": (f"'confidential': {secret}\n", "'confidential':"),
+            "nested mapping": (f"notes:\n  confidential: {secret}\n", "  confidential:"),
+            "block scalar": (f"sensitive: >-\n  {secret}\n", "sensitive: >-"),
+            "list of mappings": (f"notes:\n  - private: {secret}\n", "  - private:"),
+        }
+        for label, (field, key_line) in cases.items():
+            with self.subTest(label):
+                text = replace_once(CLEAN_NOTE, "redacted: false\n", "redacted: false\n" + field)
+                source = before_follow_up(CLEAN_SOURCE, f"**Confidential:** {secret}")
+                self.assert_fail(
+                    self.gate(self.note(text), source=self.source(source)),
+                    f"in the prefix of line {line_of(text, key_line)}",
+                )
+
+    def test_marker_heading_marks_its_section(self):
+        secret = "The Zephyr acquisition closes Friday."
+        for heading in (
+            "## Private", "## Sensitive", "## Secret", "### Confidential", "> ## Private",
+            "## Private ##", "## Internal-only",
+        ):
+            with self.subTest(heading):
+                block = f"{heading}\n\n{secret}"
+                text = before_follow_up(CLEAN_NOTE, block)
+                source = before_follow_up(CLEAN_SOURCE, block)
+                self.assert_fail(
+                    self.gate(self.note(text), source=self.source(source)),
+                    f"in the prefix of line {line_of(text, heading)}",
+                )
+
+    def test_public_headings_pass(self):
+        for heading in (
+            "## Linked", "## Key outcomes", "### Decisions", "## Rollout plan, phase two",
+            "## Sensitivity analysis", "## Secrets manager migration",
+        ):
+            with self.subTest(heading):
+                block = f"{heading}\n\nLena owns the next step."
+                text = before_follow_up(NOTE, block)
+                source = before_follow_up(SOURCE, block)
+                self.assert_pass(
+                    self.gate(self.note(text), self.redacted(), source=self.source(source))
+                )
+
     def test_prefix_only_words_mid_sentence_are_not_markers(self):
         text = before_follow_up(
             NOTE,
@@ -540,6 +596,21 @@ class MarkerTests(GateTestCase):
             "and rotated the client secret.",
         )
         self.assert_pass(self.gate(self.note(text), self.redacted()))
+
+    def test_prefix_only_words_inside_config_keys_are_not_markers(self):
+        # `client_secret:` and `private_key_path:` are identifiers. The marker rule reads
+        # a prefix-only word only when it stands as a word of its own.
+        for line in (
+            "client_secret: null",
+            "private_key_path: /etc/deploy/key",
+            "sensitive_data_scan: enabled for acme-gateway",
+        ):
+            with self.subTest(line):
+                text = before_follow_up(NOTE, line)
+                source = before_follow_up(SOURCE, line)
+                self.assert_pass(
+                    self.gate(self.note(text), self.redacted(), source=self.source(source))
+                )
 
     def test_marker_list_matches_the_specification(self):
         # references/archive.md section 1 prints the list a model reads; PREFIX_MARKERS
@@ -616,6 +687,18 @@ class CredentialShapeTests(GateTestCase):
             "oauth token or credentials file path": (
                 "", "~/.config/acme/application_default_credentials.json"
             ),
+            "multiword passphrase": ("Password: ", fake("correct horse ", "battery staple")),
+            "json basic auth header": (
+                '{"Authorization": "Basic ', fake("dXNlcjpw", "YXNzd29yZA==") + '"}'
+            ),
+            "json password": ('{"password": "', fake("hunter", "22x") + '"}'),
+            "json cookie header": ('{"Cookie": "', fake("session=", "abcdefghijklmnop") + '"}'),
+            "yaml folded password": ("password: >-\n  ", fake("aBcdEF", "123456789")),
+            "yaml literal api_key": ("api_key: |\n  ", fake("abcd", "1234efgh")),
+            "api_key quoted null string": ('api_key: "', fake("nu", "ll") + '"'),
+            "env reference with a default": (
+                'password = "${DATABASE_PASSWORD:-', fake("hunter", "22") + '}"'
+            ),
         }
         for label, (lead, secret) in cases.items():
             with self.subTest(label):
@@ -627,15 +710,18 @@ class CredentialShapeTests(GateTestCase):
                     f"credential-shaped value ({self.shape_for(label)}) on line "
                     f"{line_of(text, 'Recorded here') + 1}",
                 )
-                self.assertNotIn(secret.strip('"'), err)
+                self.assertNotIn(secret.strip('"{}'), err)
 
     @staticmethod
     def shape_for(label: str) -> str:
         """The shape name a case reports. Several labelled assignments share one shape."""
         if label == "aws session key id":
             return "aws access key"
+        if label.startswith(("json basic", "json cookie")):
+            return label.removeprefix("json ")
         assignments = (
-            "password", "passwd", "pwd", "passcode", "secret", "api_key", "client_secret"
+            "password", "passwd", "pwd", "passcode", "secret", "api_key", "client_secret",
+            "multiword", "json password", "yaml", "env reference",
         )
         return "password or secret assignment" if label.startswith(assignments) else label
 
@@ -643,6 +729,9 @@ class CredentialShapeTests(GateTestCase):
         lines = (
             "Lena rotated the CI token and the deploy key on Friday.",
             "Password: reset by IT on Friday after the audit.",
+            "Password: stored in the team vault.",
+            "Password: rotated on Friday, see the runbook.",
+            "password: none",
             "Rotation: the client secret was replaced on Friday.",
             "Clone with git@github.com:acme/acme-gateway.git as usual.",
             "Docs live at https://docs.example.com/guide for reference.",
@@ -651,6 +740,24 @@ class CredentialShapeTests(GateTestCase):
             with self.subTest(line):
                 text = before_follow_up(NOTE, line)
                 self.assert_pass(self.gate(self.note(text), self.redacted()))
+
+    def test_syntax_only_values_are_not_credentials(self):
+        # A typed null and a bare environment variable reference name where a secret
+        # lives without holding one. --allow cannot clear a credential refusal, so a false
+        # positive here would make an accurate configuration excerpt unarchivable.
+        lines = (
+            "api_key: null",
+            "api_key: ~",
+            'api_key: ""',
+            'password = "${DATABASE_PASSWORD}"',
+            "PASSWORD=$DATABASE_PASSWORD",
+            'client_secret: "${OAUTH_CLIENT_SECRET}",',
+        )
+        for line in lines:
+            with self.subTest(line):
+                text = before_follow_up(CLEAN_NOTE, line)
+                source = before_follow_up(CLEAN_SOURCE, line)
+                self.assert_pass(self.gate(self.note(text), source=self.source(source)))
 
     def test_shape_in_frontmatter_fails(self):
         text = replace_once(NOTE, "redacted: true\n", f"token: {self.GHP}\nredacted: true\n")
