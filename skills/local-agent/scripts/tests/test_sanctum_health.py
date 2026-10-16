@@ -235,6 +235,15 @@ class HomeTests(unittest.TestCase):
             with self.assertRaises(_sanctum.HomeMisconfigured):
                 self.home_with(str(not_a_dir))
 
+    def test_archive_lookup_reports_a_bad_home_as_an_archive_misconfiguration(self):
+        """The redaction gate catches ArchiveMisconfigured; a bad home must reach it."""
+        env = {"LOCAL_AGENT_HOME": "relative/home", "LOCAL_AGENT_ARCHIVE": "/"}
+        with (
+            mock.patch.dict(os.environ, env),
+            self.assertRaisesRegex(_sanctum.ArchiveMisconfigured, "relative path"),
+        ):
+            _sanctum.archive_root()
+
     def test_default_home_may_not_exist_yet(self):
         """Nobody mistypes a value they never set, so a missing default is a first birth."""
         with tempfile.TemporaryDirectory() as fake_home:

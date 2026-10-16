@@ -176,12 +176,20 @@ def archive_root() -> Path | None:
     $LOCAL_AGENT_ARCHIVE overrides. The default sits beside the sanctum rather
     than inside it, because anything inside would be loaded, counted and curated
     like identity, which is the opposite of what an archive is for.
+
+    Every misconfiguration surfaces as ArchiveMisconfigured, a bad LOCAL_AGENT_HOME
+    included, since both the default location and the overlap check depend on it.
+    Callers such as the redaction gate catch that one exception and stop cleanly.
     """
+    try:
+        home = sanctum_home()
+    except HomeMisconfigured as exc:
+        raise ArchiveMisconfigured(f"cannot place or check the archive: {exc}") from exc
     override = os.environ.get("LOCAL_AGENT_ARCHIVE")
-    root = Path(override) if override else sanctum_home() / "archive"
+    root = Path(override) if override else home / "archive"
     root = root.expanduser().resolve()
     if root.is_dir():
-        sanctum = sanctum_path()
+        sanctum = home / "_bmad" / "memory" / SKILL_NAME
         if _overlaps(root, sanctum):
             # An archive inside the sanctum defeats the entire purpose: it would be
             # loaded on waking, counted against the token budget, and curated like
