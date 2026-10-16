@@ -340,8 +340,22 @@ uv run ~/local-agent/skills/local-agent/scripts/install_global.py
 
 It creates relative symlinks in `~/.claude/skills`, `~/.agents/skills`,
 `~/.codex/skills`, and `~/.gemini/config/skills`, plus any companion skills under
-`skills/` and subagents under `agents/`. It refuses to replace a real file or
-directory, and a second run changes nothing.
+`skills/` and subagents under `agents/`. Every destination is checked before
+the first link is written: a real file or directory, a file where a folder is
+needed, an unwritable folder, or a link into another checkout refuses the whole
+install with exit status 2 and changes nothing. Links whose target was deleted
+are repointed and reported with their old target. Folders that are one physical
+folder, such as `~/.agents` symlinked to `~/.claude`, get a single link. A
+failure while writing removes the links that run created and restores the links
+it replaced; anything it cannot recover is listed with where the previous entry
+was kept, and the run exits 1. `--force` repoints links into another checkout,
+`--dry-run` prints the plan and touches nothing, and a second run changes
+nothing.
+
+Every removal relies on an atomic no-replace rename: `renamex_np` on macOS, or
+`renameat2` with `RENAME_NOREPLACE` on Linux, on a filesystem that supports it.
+The installer checks each filesystem it will write to first and refuses with
+exit status 2 when the rename is unavailable.
 
 Confirm that each selected tool can discover `local-agent` before continuing.
 The [custom-module installation guide](https://docs.bmad-method.org/how-to/install-custom-modules/)
