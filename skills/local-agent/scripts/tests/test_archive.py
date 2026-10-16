@@ -8,6 +8,7 @@ manual check into false confidence.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ from datetime import date
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1]
+REPO = SCRIPTS.parents[2]
 sys.path.insert(0, str(SCRIPTS))
 
 import _sanctum  # noqa: E402
@@ -319,6 +321,66 @@ class RedactionGateTest(unittest.TestCase):
         # An empty redacted file means the withheld material was lost. Passing here
         # would let the source log be pruned, destroying the only remaining copy.
         self.assertEqual(self._run(self.CLEAN, ""), 2)
+
+
+class IgnoreRulesTest(unittest.TestCase):
+    """The repository is pushed to a git host, so .gitignore is part of what decides what
+    leaves the machine. sessions/redacted/ holds exactly the blocks the archive gate
+    withheld; references/archive.md promises it stays local."""
+
+    IGNORED = (
+        "_bmad/memory/local-agent/sessions/redacted/2026-05-04-topic.md",
+        "_bmad/memory/local-agent/knowledge/private/notes.md",
+        "_bmad/memory/local-agent/.runtime/state.json",
+        "config/oauth_token.json",
+        "application_default_credentials.json",
+        "service-account-prod.json",
+        "keys/id_rsa",
+        "keys/id_ed25519.pub",
+        "certs/client.p12",
+        "certs/client.pfx",
+        ".npmrc",
+        ".pypirc",
+        "imports/raw/export.json",
+        "imports/chatgpt/export-2026.zip",
+        ".env.local",
+    )
+    TRACKED = (
+        "_bmad/memory/local-agent/MEMORY.md",
+        "_bmad/memory/local-agent/sessions/2026-05-04-topic.md",
+        "_bmad/memory/local-agent/INDEX.md",
+        "imports/chatgpt/README.md",
+        "skills/local-agent/scripts/tests/fixtures/redaction/redacted.md",
+    )
+
+    def check_ignore(self, path: str) -> bool:
+        result = subprocess.run(
+            ["git", "-C", str(REPO), "check-ignore", "--no-index", "-q", path],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode not in (0, 1):
+            self.fail(f"git check-ignore failed for {path}: {result.stderr}")
+        return result.returncode == 0
+
+    def setUp(self):
+        if shutil.which("git") is None:
+            self.skipTest("git is not installed")
+        probe = subprocess.run(
+            ["git", "-C", str(REPO), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=False,
+        )
+        if probe.returncode != 0 or Path(probe.stdout.strip()).resolve() != REPO.resolve():
+            self.skipTest("not running from a checkout of this repository")
+
+    def test_private_material_is_ignored(self):
+        for path in self.IGNORED:
+            with self.subTest(path):
+                self.assertTrue(self.check_ignore(path), f"{path} would be committed")
+
+    def test_the_sanctum_itself_stays_tracked(self):
+        for path in self.TRACKED:
+            with self.subTest(path):
+                self.assertFalse(self.check_ignore(path), f"{path} would be ignored")
 
 
 if __name__ == "__main__":

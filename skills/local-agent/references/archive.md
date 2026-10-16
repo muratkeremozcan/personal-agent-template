@@ -70,7 +70,7 @@ anything is written. When it passes, proceed as above. When it fails:
   redaction. `YYYY-MM-DD-person-departure` becomes `2026-08-01-team-change` or, when nothing
   survives that describes the log, `2026-08-01-withheld`.
 - Set `source_withheld: true` in the frontmatter and omit `source` entirely. Provenance still exists
-  in `sessions/redacted/`, which never leaves the machine.
+  in `sessions/redacted/`, which is machine-local (see [Where the withheld material goes](#where-the-withheld-material-goes)).
 - Print only the category and the date in the withheld notice.
 - Say so in the report. A renamed slug is something the owner should see, because it means a filename they
   chose was carrying something it should not have.
@@ -403,6 +403,11 @@ cluster line.
 
 `sessions/redacted/` is the one place in the sanctum that must never be archived, and it never ages
 out. Say that in its INDEX.md line so a future pass reads the guard before it acts.
+
+`sessions/redacted/` is machine-local.
+The repository `.gitignore` excludes it, so a push of the sanctum never carries the withheld blocks to the git host.
+That also means git is not its backup: back the folder up separately, to storage you would trust with the secrets it holds, or it is lost with the machine.
+A sanctum that committed the folder before the ignore rule existed keeps tracking it until `git rm -r --cached _bmad/memory/local-agent/sessions/redacted` takes it out of the index, and the earlier commits on the remote still hold it.
 
 ## Order of operations
 

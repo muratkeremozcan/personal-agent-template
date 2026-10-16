@@ -79,6 +79,7 @@ Three rules that are easy to get wrong and were, in a real deployment:
 - **Withheld material must go somewhere.** Withhold a block from the archive, then prune the
   source log, and it exists nowhere. It goes to `sessions/redacted/`, which `stale_logs`
   never sees because its glob is non-recursive.
+  The repository `.gitignore` keeps that folder off the git host, so it needs a backup of its own.
 - **Frontmatter is computed from the redacted text, never the source.** A person named only
   inside a withheld block would otherwise appear in `people:` and put the subject of the
   redaction onto the graph, in the copy that leaves the machine.
