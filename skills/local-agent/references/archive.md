@@ -136,7 +136,10 @@ A gate that half-parses YAML passes whatever its parser skipped, so the schema i
 | `redacted_count` | a non-negative integer |
 
 A list is a one-line flow list (`["[[person/Example]]", "[[person/Other]]"]`) or a block list with each item on its own line indented two spaces (`  - "[[person/Example]]"`).
-Values are plain or double-quoted scalars on one line.
+Values are plain or double-quoted scalars on one line, and a double-quoted value is checked without its quotes by the same rule as the plain one.
+Wikilinks are always double-quoted, because `[[...]]` unquoted is a nested list.
+`redacted`, `redacted_count` and `source_withheld` are always plain, because quoting turns a boolean or a count into a string.
+A backslash anywhere in the frontmatter is refused: a YAML reader decodes `\u005Aephyr` to `Zephyr`, and the gate reads the file as written, so an escape could carry a withheld name past it.
 Flow mappings, nested mappings, block scalars, anchors, aliases, tags such as `!!str`, comments, quoted keys and duplicate keys are all refused.
 
 Fill the link lists from the deployment's shared taxonomy file if it has one. This template ships
@@ -425,6 +428,8 @@ the owner what happened.
   a pure variable reference or placeholder (`${DATABASE_PASSWORD}`, `$DATABASE_PASSWORD`, `<your-api-key>`);
   and, for an unquoted value, one status sentence shape: an operational past participle, then a preposition, then the rest ("Password: reset by IT on Friday", "Password: stored in the team vault"; `CREDENTIAL_STATUS_VERBS` and `CREDENTIAL_STATUS_PREPOSITIONS` in the script).
   A quoted value is a string, so `"null"`, `"none"` and `"reset by IT"` count, and so does a reference with a default (`${DATABASE_PASSWORD:-hunter2}`).
+  The whole value is classified with every literal character kept, so `_null` and `___` count, and so does shell concatenation such as `"${DATABASE_PASSWORD}"hunter2` or `""hunter2`.
+  Markdown emphasis around the whole value is the only thing removed (`_none_` reads as `none`).
 - **Nothing is deleted before it is shown.** Report the withheld list to the owner, by file and category,
   before any sanctum log is pruned. They are the only one who can tell you a withheld block was fine
   or a passed block was not.

@@ -189,6 +189,14 @@ CREDENTIAL_LABEL_SHAPE = "credential assignment"
 NULL_VALUE = re.compile(r"null|none|~", re.IGNORECASE)
 PLACEHOLDER_VALUE = re.compile(r"\$\{[A-Za-z_]\w*\}|\$[A-Za-z_]\w*|<[A-Za-z][\w .-]*>")
 
+# What may follow an exempt value: punctuation and a comment. In a JSON-style object the
+# value ends at `,`, `}` or `]`, and the next key is checked on its own.
+PERMITTED_TAIL = re.compile(r"[ \t]*[.,;]*[ \t]*(?:#.*)?")
+STRUCTURED_TAIL = re.compile(r"[ \t]*(?:[,}\]].*)?")
+
+# Markdown emphasis around a whole value: `_none_`, `**null**`.
+EMPHASIS_VALUE = re.compile(r"(?P<d>\*\*|__|\*|_)(?P<v>[^*_].*?)(?P=d)")
+
 # The one prose shape that describes a credential without holding it: a past participle
 # of an operational verb, then a preposition, then the rest of the sentence.
 # "Password: reset by IT on Friday", "Password: stored in the team vault".
@@ -762,24 +770,37 @@ class Archive:
 # tags, comments and multi-document markers. A gate that half-parses YAML passes whatever
 # its parser skipped. Each value is a one-line plain scalar, a flow list of plain or
 # double-quoted scalars, or a block list of the same.
-SCHEMA_ITEMS = {
-    "source": re.compile(r'"?sessions/[^\s"#,\[\]{}]+\.md"?'),
-    "source_path": re.compile(r'"?sessions/[^\s"#,\[\]{}]+\.md"?'),
-    "people": re.compile(r'"\[\[person/[^"\[\]\n]+\]\]"'),
-    "themes": re.compile(r'"\[\[theme/[^"\[\]\n]+\]\]"'),
-    "repos": re.compile(r'"\[\[repo/[^"\[\]\n]+\]\]"'),
-    "tags": re.compile(r"[A-Za-z0-9_/-]+"),
-}
-SCHEMA_SCALARS = {
+# Each key's value, without the double quotes that may surround it. A list key's pattern
+# applies to each item. Booleans and counts are plain only, because quoting turns them
+# into strings; a wikilink is quoted only, because `[[...]]` unquoted is a nested list.
+SCHEMA_VALUES = {
     "type": re.compile(r"session-log"),
     "date": re.compile(r"\d{4}-\d{2}-\d{2}"),
+    "source": re.compile(r"sessions/[^\s\"#,\[\]{}]+\.md"),
+    "source_path": re.compile(r"sessions/[^\s\"#,\[\]{}]+\.md"),
+    "source_withheld": re.compile(r"true"),
+    "people": re.compile(r"\[\[person/[^\"\[\]\n]+\]\]"),
+    "themes": re.compile(r"\[\[theme/[^\"\[\]\n]+\]\]"),
+    "repos": re.compile(r"\[\[repo/[^\"\[\]\n]+\]\]"),
+    "tags": re.compile(r"[A-Za-z0-9_/-]+"),
     "redacted": re.compile(r"true|false"),
     "redacted_count": re.compile(r"\d+"),
-    "source_withheld": re.compile(r"true"),
 }
-SCHEMA_SCALAR_LISTS = frozenset({"source", "source_path"})
+SCHEMA_LISTS = frozenset({"source", "source_path", "people", "themes", "repos", "tags"})
+SCHEMA_SINGLE_OR_LIST = frozenset({"source", "source_path"})
+SCHEMA_PLAIN_ONLY = frozenset({"source_withheld", "redacted", "redacted_count"})
+SCHEMA_QUOTED_ONLY = frozenset({"people", "themes", "repos"})
 SCHEMA_KEY_LINE = re.compile(r"(?P<k>[a-z_]+):(?:[ ](?P<v>.*\S))?[ \t]*")
 SCHEMA_ITEM_LINE = re.compile(r"[ ]{2}- (?P<v>.*\S)[ \t]*")
+DOUBLE_QUOTED = re.compile(r'"(?P<v>[^"]*)"')
+
+
+def schema_scalar_ok(key: str, raw: str) -> bool:
+    """Whether one scalar, plain or double-quoted, has the shape its key prescribes."""
+    quoted = DOUBLE_QUOTED.fullmatch(raw)
+    if quoted:
+        return key not in SCHEMA_PLAIN_ONLY and bool(SCHEMA_VALUES[key].fullmatch(quoted["v"]))
+    return key not in SCHEMA_QUOTED_ONLY and bool(SCHEMA_VALUES[key].fullmatch(raw))
 
 
 FLOW_ITEM = r'"[^"\n]*"|[^\s,"\[\]{}][^,"\[\]{}]*'
@@ -803,9 +824,18 @@ def check_frontmatter_schema(a: Archive) -> None:
         if not line.strip():
             current = None
             continue
+        # A YAML reader decodes `\u005A` and `\x5A`, and this gate compares what is on
+        # disk, so an escaped withheld name would pass here and display decoded.
+        if "\\" in line:
+            current = None
+            a.fail(
+                f"unsupported frontmatter syntax on line {line_no}: backslash escapes are "
+                "refused, because a YAML reader decodes them and the gate reads them raw"
+            )
+            continue
         item = SCHEMA_ITEM_LINE.fullmatch(line)
         if item and current is not None:
-            if not SCHEMA_ITEMS[current].fullmatch(item.group("v")):
+            if not schema_scalar_ok(current, item.group("v")):
                 a.fail(
                     f"unsupported frontmatter syntax on line {line_no}: a `{current}` list "
                     "item must have the shape references/archive.md prescribes"
@@ -821,7 +851,7 @@ def check_frontmatter_schema(a: Archive) -> None:
             )
             continue
         key, value = key_line.group("k"), key_line.group("v")
-        if key not in SCHEMA_SCALARS and key not in SCHEMA_ITEMS:
+        if key not in SCHEMA_VALUES:
             a.fail(
                 f"unsupported frontmatter key {a.hide(key)!r} on line {line_no}; the "
                 "schema in references/archive.md lists every key an archive note may carry"
@@ -831,19 +861,18 @@ def check_frontmatter_schema(a: Archive) -> None:
             a.fail(f"frontmatter key {key!r} appears twice (line {line_no})")
         seen.add(key)
         if value is None:
-            if key in SCHEMA_ITEMS:
+            if key in SCHEMA_LISTS:
                 current = key
             else:
                 a.fail(f"unsupported frontmatter syntax on line {line_no}: `{key}` has no value")
             continue
-        if key in SCHEMA_SCALARS:
-            ok = SCHEMA_SCALARS[key].fullmatch(value) is not None
-        else:
+        if key in SCHEMA_LISTS:
             items = flow_items(value)
-            pattern = SCHEMA_ITEMS[key]
-            ok = (items is not None and all(pattern.fullmatch(v) for v in items)) or (
-                key in SCHEMA_SCALAR_LISTS and pattern.fullmatch(value) is not None
+            ok = (items is not None and all(schema_scalar_ok(key, v) for v in items)) or (
+                key in SCHEMA_SINGLE_OR_LIST and schema_scalar_ok(key, value)
             )
+        else:
+            ok = schema_scalar_ok(key, value)
         if not ok:
             a.fail(
                 f"unsupported frontmatter syntax on line {line_no}: the `{key}` value does "
@@ -1216,41 +1245,54 @@ def classify_credential_value(rest: str, structured: bool, continued: str) -> bo
     """Whether the text after a credential label holds a credential. `structured` is true
     for a quoted (JSON-style) label, where a value ends at `,`, `}` or `]`.
 
-    The exceptions: an empty value, an exact bare null (`null`, `None`, `~`), a pure
-    variable reference or placeholder, and, for an unquoted prose or YAML value, the
-    one status sentence shape. A quoted value is a string, so `"null"` and `"none"` are
-    credentials. A block scalar indicator is a credential, because a block scalar is a
-    string whatever it holds.
+    The complete value is classified with every literal character kept. An exemption
+    holds only when the whole remainder after the exempt token is permitted punctuation
+    or a comment, so `"${DATABASE_PASSWORD}"hunter2`, `""hunter2` and `_null` are
+    credentials. The exceptions: an empty value, an exact bare null (`null`, `None`,
+    `~`), a pure variable reference or placeholder, and, for an unquoted prose or YAML
+    value, the one status sentence shape. A quoted value is a string, so `"null"` and
+    `"none"` are credentials. A block scalar indicator is a credential, because a block
+    scalar is a string whatever it holds.
     """
-    rest = rest.lstrip(" \t*_")
-    if not rest.strip():
+    rest = rest.strip(" \t")
+    if not rest:
         return bool(continued) and classify_credential_value(continued, False, "")
+    tail_ok = STRUCTURED_TAIL if structured else PERMITTED_TAIL
     if rest[0] in "\"'`":
         close = rest.find(rest[0], 1)
-        content = rest[1:close] if close > 0 else rest[1:]
-        return not (content == "" or PLACEHOLDER_VALUE.fullmatch(content))
+        if close < 0:
+            return True
+        content, tail = rest[1:close], rest[close + 1 :]
+        exempt = content == "" or PLACEHOLDER_VALUE.fullmatch(content) is not None
+        return not (exempt and tail_ok.fullmatch(tail))
     if BLOCK_INDICATOR.match(rest):
         return True
-    if structured:
-        token = re.split(r"[,}\]]", rest, maxsplit=1)[0].strip()
-        tail = rest[len(re.split(r"[,}\]]", rest, maxsplit=1)[0]) :]
-        exempt = NULL_VALUE.fullmatch(token) or PLACEHOLDER_VALUE.fullmatch(token)
-        return not (exempt and re.fullmatch(r"\s*(?:[,}\]].*)?", tail))
-    value = re.sub(r"[ \t]+#.*$", "", rest).strip()
-    token = value.rstrip(".;,").strip()
-    if token == "" or NULL_VALUE.fullmatch(token) or PLACEHOLDER_VALUE.fullmatch(token):
-        return False
-    return not STATUS_SENTENCE.match(value)
+    split = re.search(r"[,}\]]" if structured else r"[ \t]+#|[.;,]*[ \t]*$", rest)
+    token, tail = rest[: split.start()].strip(), rest[split.start() :]
+    # Emphasis wrapped around the whole value is Markdown, so `_none_` is `none`.
+    emphasis = EMPHASIS_VALUE.fullmatch(token)
+    bare = emphasis.group("v") if emphasis else token
+    exempt = (
+        NULL_VALUE.fullmatch(bare) is not None
+        or PLACEHOLDER_VALUE.fullmatch(bare) is not None
+        or (not structured and STATUS_SENTENCE.match(rest) is not None)
+    )
+    return not (exempt and (tail_ok.fullmatch(tail) or STATUS_SENTENCE.match(rest)))
 
 
 def labelled_credential(line: str, continued: str) -> bool:
-    """Whether any credential label on the line carries a credential value."""
-    return any(
-        classify_credential_value(
-            line[m.end() :], bool(m.group("quote")) or "{" in line[: m.start()], continued
-        )
-        for m in CREDENTIAL_LABEL.finditer(line)
-    )
+    """Whether any credential label on the line carries a credential value. The closing
+    delimiter of a bold or italic label (`**Password:** value`) is Markdown and belongs
+    to the label, so it is removed when the text before the label opened it."""
+    found = False
+    for m in CREDENTIAL_LABEL.finditer(line):
+        rest = line[m.end() :]
+        opener = re.search(r"(\*\*|__|\*|_)$", line[: m.start()])
+        if opener and rest.startswith(opener.group(1)):
+            rest = rest[len(opener.group(1)) :]
+        structured = bool(m.group("quote")) or "{" in line[: m.start()]
+        found = found or classify_credential_value(rest, structured, continued)
+    return found
 
 
 def check_credentials(a: Archive) -> None:

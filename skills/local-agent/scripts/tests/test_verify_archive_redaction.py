@@ -811,6 +811,43 @@ class CredentialShapeTests(GateTestCase):
                 self.assertNotIn("hunter22", err)
                 self.assertNotIn("aBcdEF", err)
 
+    def test_exemptions_hold_only_for_the_whole_value(self):
+        # An underscore is a literal character, and text glued to a quoted placeholder
+        # or an empty quoted string is shell concatenation that assigns it.
+        cases = (
+            "password: _null",
+            "password: ___",
+            'PASSWORD="${DATABASE_PASSWORD}"hunter2',
+            'PASSWORD=""hunter2',
+            'PASSWORD=""null',
+            'PASSWORD="null"x',
+            "PASSWORD=$DATABASE_PASSWORD'x'",
+            "password: null hunter2",
+            "password: **hunter2**",
+            '{"api_key": nullx}',
+        )
+        for line in cases:
+            with self.subTest(line):
+                text = before_follow_up(CLEAN_NOTE, line)
+                source = before_follow_up(CLEAN_SOURCE, line)
+                self.assert_fail(
+                    self.gate(self.note(text), source=self.source(source)),
+                    f"({gate.CREDENTIAL_LABEL_SHAPE})",
+                )
+
+    def test_exempt_values_with_permitted_punctuation_pass(self):
+        for line in (
+            'PASSWORD="${DATABASE_PASSWORD}" # loaded by the shell',
+            "password: _none_",
+            "**Password:** null",
+            '{"api_key": null }',
+            "api_key: ~;",
+        ):
+            with self.subTest(line):
+                text = before_follow_up(CLEAN_NOTE, line)
+                source = before_follow_up(CLEAN_SOURCE, line)
+                self.assert_pass(self.gate(self.note(text), source=self.source(source)))
+
     def test_credential_rules_apply_inside_fenced_code(self):
         block = "```yaml\ndatabase:\n  password: >-\n    aBcdEF123456789\n  pin: 1234\n```"
         text = before_follow_up(CLEAN_NOTE, block)
@@ -1083,6 +1120,60 @@ class FrontmatterSchemaTests(GateTestCase):
                 )
                 self.assertRegex(
                     err, r"unsupported frontmatter (?:syntax|key)|appears twice"
+                )
+
+    def test_escaped_withheld_name_is_refused(self):
+        # A YAML reader decodes these to "Zephyr", the person named only in the withheld
+        # block, while the gate reads the escape raw. Backslashes are refused outright.
+        red = self.redacted(withheld("Zephyr departs Friday."))
+        people = 'people: ["[[person/Lena]]"]'
+        cases = {
+            "unicode escape, flow list": r'people: ["[[person/\u005Aephyr]]"]',
+            "hex escape, flow list": r'people: ["[[person/\x5Aephyr]]"]',
+            "unicode escape, block list": 'people:\n  - "[[person/\\u005Aephyr]]"',
+            "hex escape, block list": 'people:\n  - "[[person/\\x5Aephyr]]"',
+            "escaped quote in a tag": 'people: ["[[person/Lena]]"]\ntags: ["a\\"b"]',
+        }
+        for label, new in cases.items():
+            with self.subTest(label):
+                err = self.assert_fail(
+                    self.gate(self.note(replace_once(NOTE, people, new)), red),
+                    "backslash escapes are refused",
+                )
+                self.assert_no_withheld_names(err)
+                self.assertNotIn("zephyr", err.lower())
+
+    def test_double_quoted_scalars_pass(self):
+        cases = {
+            "quoted type": ("type: session-log", 'type: "session-log"'),
+            "quoted date": ("date: 2026-05-04", 'date: "2026-05-04"'),
+            "quoted source": (f"source: sessions/{SLUG}.md", f'source: "sessions/{SLUG}.md"'),
+            "quoted flow tags": ("redacted: true", 'tags: ["work", "public"]\nredacted: true'),
+            "quoted block tags": (
+                "redacted: true", 'tags:\n  - "work"\n  - "public"\nredacted: true'
+            ),
+        }
+        for label, (old, new) in cases.items():
+            with self.subTest(label):
+                note = self.note(replace_once(NOTE, old, new))
+                self.assert_pass(self.gate(note, self.redacted()))
+
+    def test_quoting_that_changes_a_type_is_refused(self):
+        # A quoted boolean or count is a string to a YAML reader, and an unquoted
+        # wikilink is a nested list.
+        cases = {
+            "quoted boolean": ("redacted: true", 'redacted: "true"'),
+            "quoted count": ("redacted_count: 1", 'redacted_count: "1"'),
+            "unquoted wikilink": ('people: ["[[person/Lena]]"]', "people: [[[person/Lena]]]"),
+            "unquoted block wikilink": (
+                'people: ["[[person/Lena]]"]', "people:\n  - [[person/Lena]]"
+            ),
+        }
+        for label, (old, new) in cases.items():
+            with self.subTest(label):
+                self.assert_fail(
+                    self.gate(self.note(replace_once(NOTE, old, new)), self.redacted()),
+                    "unsupported frontmatter syntax",
                 )
 
     def test_documented_shapes_pass(self):
