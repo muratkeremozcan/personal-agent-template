@@ -10,13 +10,19 @@ sanctum exists and First Breath finished, prints the full identity in a single
 read (INDEX, PERSONA, CREED, BOND, MEMORY, CAPABILITIES) so the agent becomes
 itself in one shot instead of six.
 
-Three modes:
-  FIRST_BREATH        no sanctum scaffolded yet -> the one birth.
+Modes:
+  FIRST_BREATH        no sanctum at the canonical home yet -> the one birth.
   FIRST_BREATH_RESUME sanctum scaffolded but the ".born" marker is absent, so a
                       prior First Breath was interrupted before it finished. The
                       files still hold seed placeholders; resume the birth rather
                       than waking as if fully formed.
   WAKING              sanctum present and sealed with ".born" -> the normal path.
+  DAMAGED             a sanctum exists but identity files are missing from it, as
+                      a sync conflict or partial checkout leaves it. Restore them;
+                      a birth here would overwrite a real identity. Exits 1.
+  HOME_MISCONFIGURED  LOCAL_AGENT_HOME is relative or names a directory that does
+                      not exist, which is a typo far more often than a new home.
+                      Fix the variable before anything else. Exits 1.
 
 This loads runtime memory only. It never reads or writes config or customize.toml.
 
@@ -32,6 +38,7 @@ Usage:
                   awareness, but it never determines where the sanctum lives.
 """
 
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -41,7 +48,11 @@ from _sanctum import (
     BORN_MARKER,
     IDENTITY_FILES,
     SKILL_NAME,
+    HomeMisconfigured,
+    birth_date,
     health,
+    missing_identity_files,
+    read_text,
     sanctum_home,
 )
 
@@ -54,12 +65,12 @@ CURATE_SCRIPT = Path(__file__).resolve().parent / "curate.py"
 def emit(path: Path) -> None:
     print(f"\n===== {path.name} =====")
     try:
-        print(path.read_text(encoding="utf-8").rstrip())
+        print(read_text(path).rstrip())
     except FileNotFoundError:
         print(f"(missing: {path.name})")
 
 
-def emit_curation_notice(sanctum: Path) -> None:
+def emit_curation_notice(sanctum: Path, project_root: Path) -> None:
     """Fire the curation pass from waking itself, so nothing has to schedule it.
 
     A soft token guardrail that only runs when someone remembers to ask for it
@@ -83,11 +94,55 @@ def emit_curation_notice(sanctum: Path) -> None:
         "Remember or Recall, or they are mid-thread, do the pass after their "
         "work is done, and never announce it as a status report.\n"
         "Exact token counts: uv run "
-        f"{shlex.quote(str(CURATE_SCRIPT))} {shlex.quote(str(sanctum.parent.parent.parent))}"
+        f"{shlex.quote(str(CURATE_SCRIPT))} {shlex.quote(str(project_root))}"
     )
 
 
+def emit_damage_report(home: Path, sanctum: Path, missing: list[str], project_root: Path) -> None:
+    """Name what is missing and how to get it back, and hold the birth off.
+
+    This state once read as "no sanctum", so waking announced the one birth over a
+    real identity. first-breath.md then rewrote BOND.md and PERSONA.md and stamped a
+    new date into `.born`, which also cost the original First Breath log its
+    exemption. A sanctum that exists is never a birth.
+    """
+    born = (sanctum / BORN_MARKER).is_file()
+    born_on = birth_date(sanctum)
+    relative = [f"{sanctum.relative_to(home).as_posix()}/{name}" for name in missing]
+    quoted = " ".join(shlex.quote(r) for r in relative)
+    git = f"git -C {shlex.quote(str(home))}"
+
+    print("MODE: DAMAGED")
+    print(f"Invoked from: {project_root}")
+    print(f"Sanctum: {sanctum}")
+    print(f"Missing identity files: {', '.join(missing)}")
+    if born:
+        print(f"{BORN_MARKER}: present ({born_on.isoformat() if born_on else 'no date'})")
+    else:
+        print(f"{BORN_MARKER}: absent")
+    print(
+        "\nThis sanctum holds an identity, so this is a restore. Do not run First Breath "
+        f"or init-sanctum.py, do not write {BORN_MARKER}, and do not rewrite the files "
+        "that are still present. Tell your owner which files are missing and stop until "
+        "they are back.\n"
+        "\nRestore them from history or a backup:\n"
+        f"  {git} status -- {quoted}\n"
+        f"  {git} checkout HEAD -- {quoted}    # deleted since the last commit\n"
+        f"  {git} log --oneline -- {quoted}    # find an older version to check out\n"
+        "or copy them back from a backup or another synced device."
+    )
+    if not born:
+        print(
+            "If this folder is only a scaffold left by an interrupted init-sanctum.py, with "
+            "no conversation saved in it, move it aside and run First Breath again."
+        )
+
+
 def main() -> int:
+    # Identity files are printed verbatim, U+FFFD from a bad byte included. A pipe on
+    # a legacy code page cannot encode every character, and waking must not crash
+    # over one.
+    sys.stdout.reconfigure(errors="replace")
     args = sys.argv[1:]
     positional = [a for a in args if not a.startswith("--")]
     if not positional:
@@ -95,19 +150,32 @@ def main() -> int:
         return 2
 
     project_root = Path(positional[0]).resolve()
-    sanctum = sanctum_home() / "_bmad" / "memory" / SKILL_NAME
+    try:
+        home = sanctum_home()
+    except HomeMisconfigured as exc:
+        print("MODE: HOME_MISCONFIGURED")
+        print(f"Invoked from: {project_root}")
+        print(str(exc))
+        print(
+            "Do not start First Breath and do not run init-sanctum.py: with the home "
+            "unresolved, a birth would create a second identity in the wrong place. "
+            "Tell your owner the exact value above and stop until it is fixed."
+        )
+        return 1
+    sanctum = home / "_bmad" / "memory" / SKILL_NAME
 
-    scaffolded = (
-        sanctum.is_dir()
-        and (sanctum / "CREED.md").is_file()
-        and (sanctum / "MEMORY.md").is_file()
-    )
-    if not scaffolded:
+    # lexists, so a dangling symlink at the sanctum path reads as damaged.
+    if not os.path.lexists(sanctum):
         print("MODE: FIRST_BREATH")
         print(f"Invoked from: {project_root}")
         print(f"NO SANCTUM at {sanctum}")
         print("This is your one birth. Load references/first-breath.md and follow it.")
         return 0
+
+    missing = missing_identity_files(sanctum)
+    if missing:
+        emit_damage_report(home, sanctum, missing, project_root)
+        return 1
 
     if not (sanctum / BORN_MARKER).is_file():
         print("MODE: FIRST_BREATH_RESUME")
@@ -130,7 +198,7 @@ def main() -> int:
     print(f"Sanctum: {sanctum}")
     for name in IDENTITY_FILES:
         emit(sanctum / name)
-    emit_curation_notice(sanctum)
+    emit_curation_notice(sanctum, project_root)
     return 0
 
 

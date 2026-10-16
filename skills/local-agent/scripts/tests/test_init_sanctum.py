@@ -4,11 +4,14 @@
 # ///
 """Unit tests for init-sanctum.py: scaffolding, substitution, capability discovery."""
 
+import contextlib
 import importlib.util
+import io
 import os
-import sys
 import tempfile
+import time
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -19,109 +22,289 @@ spec = importlib.util.spec_from_file_location("init_sanctum", SCRIPT_PATH)
 init_sanctum = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(init_sanctum)
 
+import _sanctum  # noqa: E402  importable once init-sanctum.py has put scripts/ on sys.path
 
-class InitSanctumTests(unittest.TestCase):
+BIRTH = date(2026, 8, 1)
+
+
+class InitCase(unittest.TestCase):
+    """Each test gets its own home, a fixed birth date, and no real archive."""
+
     def setUp(self):
-        # init-sanctum resolves the canonical home from LOCAL_AGENT_HOME. Each test
-        # points it at its own temporary directory so no test can touch a real
-        # sanctum under ~/local-agent.
-        fallback = tempfile.TemporaryDirectory()
-        self.addCleanup(fallback.cleanup)
-        self._env = mock.patch.dict(os.environ, {"LOCAL_AGENT_HOME": fallback.name})
-        self._env.start()
-        self.addCleanup(self._env.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name).resolve()
+        project = tempfile.TemporaryDirectory()
+        self.addCleanup(project.cleanup)
+        self.project = Path(project.name).resolve()
+        self.sanctum = self.home / "_bmad" / "memory" / "local-agent"
 
-    def use_home(self, path: Path) -> None:
-        os.environ["LOCAL_AGENT_HOME"] = str(path)
+        env = mock.patch.dict(os.environ, {"LOCAL_AGENT_HOME": str(self.home)})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("LOCAL_AGENT_ARCHIVE", None)
+        clock = mock.patch.object(init_sanctum, "local_today", return_value=BIRTH)
+        clock.start()
+        self.addCleanup(clock.stop)
 
-    def test_scaffolds_sanctum_against_real_skill_bundle(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            project_root = Path(tmp)
-            self.use_home(project_root)
-            (project_root / "_bmad").mkdir()
-            sys.argv = ["init-sanctum.py", str(project_root), str(SKILL_ROOT)]
-            init_sanctum.main()
+    def run_init(self, *args):
+        """Run main() with captured output: (exit code, stdout, stderr)."""
+        argv = list(args) if args else [str(self.project), str(SKILL_ROOT)]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = init_sanctum.main(argv)
+            except SystemExit as exc:
+                code = exc.code
+        return code, out.getvalue(), err.getvalue()
 
-            sanctum = project_root / "_bmad" / "memory" / "local-agent"
-            for name in [
-                "INDEX.md",
-                "PERSONA.md",
-                "CREED.md",
-                "BOND.md",
-                "MEMORY.md",
-                "CAPABILITIES.md",
-            ]:
-                self.assertTrue((sanctum / name).is_file(), f"missing {name}")
-            self.assertTrue((sanctum / "knowledge").is_dir())
 
-            persona = (sanctum / "PERSONA.md").read_text()
-            self.assertNotIn("{birth_date}", persona)
-            self.assertIn("{agent_name}", persona)
+class ScaffoldTests(InitCase):
+    """One scaffold against the real skill bundle, inspected one subject per test."""
 
-            capabilities = (sanctum / "CAPABILITIES.md").read_text()
-            self.assertIn("[REM]", capabilities)
-            self.assertIn("[RCL]", capabilities)
-            self.assertNotIn("External:", capabilities)
-            self.assertIn("## Learned", capabilities)  # evolvable
+    def setUp(self):
+        super().setUp()
+        self.code, self.out, self.err = self.run_init()
+        self.assertEqual(self.code, 0, self.err)
 
-            self.assertFalse((sanctum / "references" / "first-breath.md").exists())
-            self.assertTrue((sanctum / "scripts" / "wake.py").is_file())
-            self.assertTrue((sanctum / "scripts" / "curate.py").is_file())
-            self.assertFalse((sanctum / "scripts" / "init-sanctum.py").exists())
-            self.assertFalse((sanctum / "scripts" / "install_global.py").exists())
+    def test_every_identity_file_and_structural_folder_exists(self):
+        for name in _sanctum.IDENTITY_FILES:
+            self.assertTrue((self.sanctum / name).is_file(), f"missing {name}")
+        for folder in ("capabilities", "knowledge", "sessions", "references", "scripts"):
+            self.assertTrue((self.sanctum / folder).is_dir(), f"missing {folder}/")
+        self.assertIn(f"Created sanctum at {self.sanctum}", self.out)
+        self.assertIn("First Breath scaffolding complete.", self.out)
 
+    def test_templates_carry_the_birth_date_and_keep_agent_placeholders(self):
+        persona = (self.sanctum / "PERSONA.md").read_text(encoding="utf-8")
+        self.assertIn(f"- **Born:** {BIRTH.isoformat()}\n", persona)
+        self.assertIn("{agent_name}", persona)
+
+    def test_templates_point_at_the_final_sanctum_path(self):
+        creed = (self.sanctum / "CREED.md").read_text(encoding="utf-8")
+        self.assertIn(f"`{self.sanctum}/`", creed)
+        self.assertNotIn(".partial-", creed)
+
+    def test_capabilities_are_discovered_from_reference_frontmatter(self):
+        capabilities = (self.sanctum / "CAPABILITIES.md").read_text(encoding="utf-8")
+        self.assertIn("[REM]", capabilities)
+        self.assertIn("[RCL]", capabilities)
+        self.assertNotIn("External:", capabilities)
+        self.assertIn("## Learned", capabilities)  # evolvable
+
+    def test_every_built_in_capability_renders_its_description(self):
+        rows = [
+            line for line in
+            (self.sanctum / "CAPABILITIES.md").read_text(encoding="utf-8").splitlines()
+            if line.startswith("| [")
+        ]
+        self.assertGreaterEqual(len(rows), 3)
+        for row in rows:
+            code, name, description, _source = (c.strip() for c in row.strip("|").split("|"))
+            self.assertTrue(description, f"{code} {name} renders an empty description")
+        self.assertIn(
+            "| [RCL] | Recall | Surface what's stored in the sanctum about the owner, their "
+            "work, or past sessions |",
+            "\n".join(rows),
+        )
+
+    def test_bundle_only_files_stay_in_the_bundle(self):
+        self.assertFalse((self.sanctum / "references" / "first-breath.md").exists())
+        self.assertTrue((self.sanctum / "references" / "archive.md").is_file())
+        self.assertTrue((self.sanctum / "scripts" / "wake.py").is_file())
+        self.assertTrue((self.sanctum / "scripts" / "curate.py").is_file())
+        self.assertFalse((self.sanctum / "scripts" / "init-sanctum.py").exists())
+        self.assertFalse((self.sanctum / "scripts" / "install_global.py").exists())
+
+    def test_no_staging_folder_is_left_behind(self):
+        self.assertEqual(sorted(p.name for p in self.sanctum.parent.iterdir()), ["local-agent"])
+
+    def test_second_run_before_birth_says_to_resume(self):
+        memory = self.sanctum / "MEMORY.md"
+        memory.write_text("owner-edited content should survive")
+        code, out, _ = self.run_init()
+        self.assertEqual(code, 0)
+        self.assertIn("Skipping First Breath scaffolding.", out)
+        self.assertIn("resume First Breath", out)
+        self.assertNotIn("already been born", out)
+        self.assertEqual(memory.read_text(), "owner-edited content should survive")
+
+    def test_second_run_after_birth_says_born(self):
+        (self.sanctum / ".born").write_text(BIRTH.isoformat())
+        code, out, _ = self.run_init()
+        self.assertEqual(code, 0)
+        self.assertIn("This agent has already been born.", out)
+        self.assertNotIn("resume", out)
+
+
+class ConfigTests(InitCase):
     def test_reads_current_toml_config(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            project_root = Path(tmp)
-            self.use_home(project_root)
-            bmad = project_root / "_bmad"
-            bmad.mkdir()
-            (bmad / "config.toml").write_text(
-                '[core]\nuser_name = "Alex"\ncommunication_language = "English"\n'
-            )
-            (bmad / "config.user.toml").write_text(
-                '[core]\ncommunication_language = "Spanish"\n'
-            )
-            sys.argv = ["init-sanctum.py", str(project_root), str(SKILL_ROOT)]
-            init_sanctum.main()
-
-            bond = (
-                project_root / "_bmad" / "memory" / "local-agent" / "BOND.md"
-            ).read_text()
-            self.assertIn("Alex", bond)
-            self.assertIn("Spanish", bond)
-
-    def test_second_run_is_idempotent(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            project_root = Path(tmp)
-            self.use_home(project_root)
-            (project_root / "_bmad").mkdir()
-            sys.argv = ["init-sanctum.py", str(project_root), str(SKILL_ROOT)]
-            init_sanctum.main()
-            marker = project_root / "_bmad" / "memory" / "local-agent" / "MEMORY.md"
-            marker.write_text("owner-edited content should survive")
-
-            with self.assertRaises(SystemExit) as ctx:
-                init_sanctum.main()
-            self.assertEqual(ctx.exception.code, 0)
-            self.assertEqual(marker.read_text(), "owner-edited content should survive")
+        bmad = self.home / "_bmad"
+        bmad.mkdir()
+        (bmad / "config.toml").write_text(
+            '[core]\nuser_name = "Alex"\ncommunication_language = "English"\n'
+        )
+        (bmad / "config.user.toml").write_text('[core]\ncommunication_language = "Spanish"\n')
+        code, _, err = self.run_init()
+        self.assertEqual(code, 0, err)
+        bond = (self.sanctum / "BOND.md").read_text()
+        self.assertIn("- **Name:** Alex\n", bond)
+        self.assertIn("Spanish", bond)
 
     def test_scaffold_lands_in_the_canonical_home_whatever_the_project_root(self):
-        with (
-            tempfile.TemporaryDirectory() as home_dir,
-            tempfile.TemporaryDirectory() as project_dir,
-        ):
-            home, project = Path(home_dir), Path(project_dir)
-            self.use_home(home)
-            (home / "_bmad").mkdir()
-            (home / "_bmad" / "config.toml").write_text('[core]\nuser_name = "Alex"\n')
-            sys.argv = ["init-sanctum.py", str(project), str(SKILL_ROOT)]
-            init_sanctum.main()
+        (self.home / "_bmad").mkdir()
+        (self.home / "_bmad" / "config.toml").write_text('[core]\nuser_name = "Alex"\n')
+        code, _, err = self.run_init()
+        self.assertEqual(code, 0, err)
+        self.assertTrue((self.sanctum / "MEMORY.md").is_file())
+        self.assertIn("Alex", (self.sanctum / "BOND.md").read_text(encoding="utf-8"))
+        self.assertFalse((self.project / "_bmad").exists())
 
-            sanctum = home / "_bmad" / "memory" / "local-agent"
-            self.assertTrue((sanctum / "MEMORY.md").is_file())
-            self.assertIn("Alex", (sanctum / "BOND.md").read_text(encoding="utf-8"))
-            self.assertFalse((project / "_bmad").exists())
+
+class FailureTests(InitCase):
+    def test_usage_error_goes_to_stderr_with_exit_2(self):
+        code, out, err = self.run_init(str(self.project))
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("usage:", err)
+        self.assertIn("skill_path", err)
+
+    def test_missing_skill_bundle_is_refused_before_anything_is_created(self):
+        bogus = self.project / "nonexistent-skill"
+        code, out, err = self.run_init(str(self.project), str(bogus))
+        self.assertEqual(code, 2)
+        self.assertIn(f"{bogus} is not a local-agent skill directory", err)
+        self.assertIn("references/, assets/", err)
+        self.assertEqual(out, "")
+        self.assertFalse((self.home / "_bmad").exists())
+
+    def test_crash_mid_build_leaves_nothing_at_the_sanctum_path(self):
+        with (
+            mock.patch.object(init_sanctum, "copy_scripts", side_effect=OSError("disk full")),
+            self.assertRaisesRegex(OSError, "disk full"),
+        ):
+            self.run_init()
+        self.assertFalse(self.sanctum.exists())
+        self.assertEqual(list(self.sanctum.parent.iterdir()), [])
+
+        code, _, err = self.run_init()
+        self.assertEqual(code, 0, err)
+        self.assertTrue((self.sanctum / "CAPABILITIES.md").is_file())
+
+    def test_an_incomplete_build_is_never_published(self):
+        real_build = init_sanctum.build_sanctum
+
+        def build_without_capabilities(staging, *args):
+            real_build(staging, *args)
+            (staging / "CAPABILITIES.md").unlink()
+
+        with mock.patch.object(init_sanctum, "build_sanctum", build_without_capabilities):
+            code, out, err = self.run_init()
+        self.assertEqual(code, 2)
+        self.assertIn("is missing CAPABILITIES.md, so nothing was published", err)
+        self.assertNotIn("scaffolding complete", out)
+        self.assertFalse(os.path.lexists(self.sanctum))
+        self.assertEqual(list(self.sanctum.parent.iterdir()), [])
+
+    def test_stale_staging_from_a_killed_run_is_removed(self):
+        stale = self.sanctum.parent / "local-agent.partial-4242-deadbeef"
+        (stale / "references").mkdir(parents=True)
+        (stale / "INDEX.md").write_text("half written")
+        old = time.time() - init_sanctum.STALE_STAGING_SECONDS - 60
+        os.utime(stale, (old, old))
+        code, out, err = self.run_init()
+        self.assertEqual(code, 0, err)
+        self.assertFalse(stale.exists())
+        self.assertIn(f"Removed {stale.name}", out)
+        self.assertTrue((self.sanctum / "INDEX.md").is_file())
+
+    def test_staging_of_a_run_still_building_is_left_alone(self):
+        live = self.sanctum.parent / "local-agent.partial-4243-cafebabe"
+        live.mkdir(parents=True)
+        code, out, err = self.run_init()
+        self.assertEqual(code, 0, err)
+        self.assertTrue(live.is_dir())
+        self.assertNotIn("Removed", out)
+
+    def test_dangling_symlink_at_the_sanctum_path_is_never_scaffolded_over(self):
+        self.sanctum.parent.mkdir(parents=True)
+        try:
+            self.sanctum.symlink_to(self.home / "moved-away")
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        code, _, err = self.run_init()
+        self.assertEqual(code, 1)
+        self.assertIn("is missing INDEX.md", err)
+        self.assertTrue(self.sanctum.is_symlink())
+
+    def test_malformed_config_is_a_configuration_error(self):
+        (self.home / "_bmad").mkdir()
+        # Invalid UTF-8 fails under tomllib and under the 3.10 fallback parser alike.
+        (self.home / "_bmad" / "config.toml").write_bytes(b'[core]\nuser_name = "caf\xe9"\n')
+        code, _, err = self.run_init()
+        self.assertEqual(code, 2)
+        self.assertIn(f"cannot read {self.home / '_bmad' / 'config.toml'}", err)
+        self.assertFalse(self.sanctum.exists())
+
+    def test_damaged_sanctum_is_never_scaffolded_over(self):
+        (self.sanctum / "sessions").mkdir(parents=True)
+        (self.sanctum / "BOND.md").write_text("real bond")
+        code, out, err = self.run_init()
+        self.assertEqual(code, 1)
+        self.assertIn("is missing INDEX.md, PERSONA.md, CREED.md, MEMORY.md, CAPABILITIES.md", err)
+        self.assertNotIn("Skipping", out)
+        self.assertEqual((self.sanctum / "BOND.md").read_text(), "real bond")
+        self.assertFalse((self.sanctum / "PERSONA.md").exists())
+
+    def test_relative_home_is_refused(self):
+        os.environ["LOCAL_AGENT_HOME"] = "local-agent"
+        code, _, err = self.run_init()
+        self.assertEqual(code, 2)
+        self.assertIn("relative path", err)
+
+    def test_mistyped_home_is_refused_and_not_created(self):
+        typo = self.home / "local-agnet"
+        os.environ["LOCAL_AGENT_HOME"] = str(typo)
+        code, _, err = self.run_init()
+        self.assertEqual(code, 2)
+        self.assertIn(f"LOCAL_AGENT_HOME is set to {typo}", err)
+        self.assertFalse(typo.exists())
+
+
+class FrontmatterTests(unittest.TestCase):
+    def parse(self, frontmatter):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cap.md"
+            path.write_text(f"---\n{frontmatter}---\nbody\n", encoding="utf-8")
+            return init_sanctum.parse_frontmatter(path)
+
+    def test_plain_value(self):
+        self.assertEqual(self.parse("name: X\ndescription: does x\n")["description"], "does x")
+
+    def test_continuation_lines_join_with_spaces(self):
+        meta = self.parse("name: X\ndescription:\n  first line,\n  second line\ncode: XX\n")
+        self.assertEqual(meta["description"], "first line, second line")
+        self.assertEqual(meta["code"], "XX")
+
+    def test_folded_and_literal_block_indicators(self):
+        for indicator in (">", ">-", "|", "|-"):
+            with self.subTest(indicator=indicator):
+                meta = self.parse(f"description: {indicator}\n  one\n  two\ncode: XX\n")
+                self.assertEqual(meta["description"], "one two")
+                self.assertEqual(meta["code"], "XX")
+
+    def test_continuation_of_a_quoted_value(self):
+        meta = self.parse('description: "starts here\n  and ends here"\n')
+        self.assertEqual(meta["description"], "starts here and ends here")
+
+
+class CapabilityFormattingTests(unittest.TestCase):
+    def test_a_capability_without_a_description_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            refs = Path(tmp)
+            (refs / "bare.md").write_text("---\nname: Z\ndescription:\ncode: ZZ\n---\nbody\n")
+            with self.assertRaisesRegex(ValueError, r"bare\.md.*description"):
+                init_sanctum.discover_capabilities(refs, "references")
 
     def test_external_capability_source_formatting(self):
         with tempfile.TemporaryDirectory() as tmp:

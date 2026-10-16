@@ -17,7 +17,8 @@ over exact numbers instead of estimates:
     ceiling, and the entries carrying so much prose they belong in the file
     they point at
   - which session logs have aged past the retention threshold (by the date in
-    the filename), so the aged ones can be pruned
+    the filename), each with the archive path it moves to, so the aged ones are
+    distilled and archived before their source is pruned (references/archive.md)
   - which files on disk have drifted out of INDEX.md ("an unlisted file is a
     lost file")
 
@@ -36,13 +37,16 @@ Usage:
     --guardrail:   MEMORY.md soft token guardrail (default 1500)
     --wake-budget: soft token ceiling for the whole waking load (default 13000)
 
-Exit codes: 0 success, 1 no sanctum found, 2 usage error.
+    All three take positive integers.
+
+Exit codes: 0 success, 1 no sanctum found, 2 usage or LOCAL_AGENT_HOME error.
 """
 
 import argparse
 import functools
 import importlib
 import json
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -50,6 +54,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _sanctum import (
     BORN_MARKER,
+    BORN_UNDATED_NOTE,
+    DECODE_WARNINGS,
     ENTRY_LINE,
     INDEX_ENTRY_DEMOTE_CHARS,
     INDEX_ENTRY_TARGET_CHARS,
@@ -60,10 +66,15 @@ from _sanctum import (
     SKILL_NAME,
     WAKE_BUDGET_TOKENS,
     ArchiveMisconfigured,
+    HomeMisconfigured,
     archive_root,
     archive_target,
+    birth_date,
+    born_undated,
     local_today,
+    missing_identity_files,
     prose_of,
+    read_text,
     sanctum_home,
     stale_logs,
     undated_logs,
@@ -76,6 +87,13 @@ from _sanctum import (
 SKELETON = set(WAKE_FILES)
 # Structural directories that are never individually indexed as organic files.
 STRUCTURAL_DIRS = {"references", "scripts", "sessions"}
+
+# Absolute, because the report is read and acted on from whatever directory the
+# session opened in. curate.py runs from the skill bundle or from the sanctum's own
+# copy, and both keep references/ beside scripts/.
+SCRIPTS_DIR = Path(__file__).resolve().parent
+ARCHIVE_PROCEDURE = SCRIPTS_DIR.parent / "references" / "archive.md"
+REDACTION_GATE = SCRIPTS_DIR / "verify_archive_redaction.py"
 
 
 @functools.lru_cache(maxsize=1)
@@ -122,7 +140,7 @@ def measure_memory(sanctum: Path, guardrail: int) -> dict:
             "guardrail": guardrail,
             "over_guardrail": False,
         }
-    tokens, method = count_tokens(memory.read_text(encoding="utf-8"))
+    tokens, method = count_tokens(read_text(memory))
     return {
         "tokens": tokens,
         "method": method,
@@ -144,7 +162,7 @@ def measure_wake(sanctum: Path, budget: int) -> dict:
         if not path.is_file():
             per_file[name] = 0
             continue
-        tokens, method = count_tokens(path.read_text(encoding="utf-8"))
+        tokens, method = count_tokens(read_text(path))
         per_file[name] = tokens
     total = sum(per_file.values())
     return {
@@ -167,7 +185,7 @@ def measure_index(sanctum: Path) -> dict:
     if not index.is_file():
         return {"present": False}
 
-    text = index.read_text(encoding="utf-8")
+    text = read_text(index)
     lines = text.splitlines()
     entries = [ln.rstrip() for ln in lines if ENTRY_LINE.match(ln)]
     over_target = [ln for ln in entries if len(prose_of(ln)) > INDEX_ENTRY_TARGET_CHARS]
@@ -235,7 +253,7 @@ def stale_session_logs(sanctum: Path, days: int, today: date) -> dict:
         out["note"] = (
             "Aged logs have nowhere to go. Set LOCAL_AGENT_ARCHIVE, or create "
             f"{sanctum_home() / 'archive'}, to archive instead of deleting. "
-            "See references/archive.md."
+            f"See {ARCHIVE_PROCEDURE}."
         )
         return out
     undated = undated_logs(sanctum)
@@ -255,15 +273,37 @@ def stale_session_logs(sanctum: Path, days: int, today: date) -> dict:
         {"log": name, "archives_to": archive_target(name, root) or "unknown: no date in filename"}
         for name in stale
     ]
-    out["procedure"] = "references/archive.md"
-    out["gate"] = "scripts/verify_archive_redaction.py"
+    out["procedure"] = str(ARCHIVE_PROCEDURE)
+    out["gate"] = str(REDACTION_GATE)
     return out
+
+
+def listed_in(index_text: str, candidate: str) -> bool:
+    """Whether INDEX.md names `candidate`, a path relative to the sanctum.
+
+    A substring test counted `notes.md` as listed when the index only mentioned
+    `meeting-notes.md`, so a lost file read as found. The index may name the full
+    path or any tail of it that starts at a component (`knowledge/a/notes.md`,
+    `a/notes.md`, `notes.md`), and that tail must stand alone: no path character
+    directly before it, so `knowledge/notes.md` never lists a root `notes.md`, and
+    no filename character or further extension directly after a file. A folder is
+    named with its trailing slash, so prose that happens to say "drafts" leaves an
+    unlisted `drafts/` reported.
+    """
+    is_dir = candidate.endswith("/")
+    parts = candidate.rstrip("/").split("/")
+    after = "" if is_dir else r"(?![\w-]|\.\w)"
+    for i in range(len(parts)):
+        tail = "/".join(parts[i:]) + ("/" if is_dir else "")
+        if re.search(rf"(?<![\w./-]){re.escape(tail)}{after}", index_text):
+            return True
+    return False
 
 
 def index_drift(sanctum: Path) -> dict:
     """Files on disk whose basename never appears in INDEX.md."""
     index = sanctum / "INDEX.md"
-    index_text = index.read_text(encoding="utf-8") if index.is_file() else ""
+    index_text = read_text(index) if index.is_file() else ""
 
     candidates: list[str] = []
     # Organic entries at the sanctum root.
@@ -292,8 +332,23 @@ def index_drift(sanctum: Path) -> dict:
             continue
         candidates.append(entry.name + ("/" if entry.is_dir() else ""))
 
-    unlisted = [c for c in candidates if Path(c).name not in index_text]
+    unlisted = [c for c in candidates if not listed_in(index_text, c)]
     return {"unlisted": unlisted, "has_index": index.is_file()}
+
+
+def positive_int(value: str) -> int:
+    """argparse type for a count that is only meaningful above zero.
+
+    `--days -1` once passed and marked today's log stale, which is an instruction to
+    archive and prune a log written an hour ago.
+    """
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from None
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {number}")
+    return number
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -310,26 +365,32 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--days",
-        type=int,
+        type=positive_int,
         default=SESSION_RETENTION_DAYS,
         help=f"session-log retention threshold (default {SESSION_RETENTION_DAYS})",
     )
     p.add_argument(
         "--guardrail",
-        type=int,
+        type=positive_int,
         default=MEMORY_GUARDRAIL_TOKENS,
         help=f"MEMORY.md soft token guardrail (default {MEMORY_GUARDRAIL_TOKENS})",
     )
     p.add_argument(
         "--wake-budget",
-        type=int,
+        type=positive_int,
         default=WAKE_BUDGET_TOKENS,
         help=f"soft token ceiling for the whole waking load (default {WAKE_BUDGET_TOKENS})",
     )
     args = p.parse_args(argv)
+    DECODE_WARNINGS.clear()
 
     project_root = Path(args.project_root).resolve()
-    sanctum = sanctum_home() / "_bmad" / "memory" / SKILL_NAME
+    try:
+        home = sanctum_home()
+    except HomeMisconfigured as exc:
+        print(json.dumps({"error": "LOCAL_AGENT_HOME misconfigured", "detail": str(exc)}))
+        return 2
+    sanctum = home / "_bmad" / "memory" / SKILL_NAME
     if not sanctum.is_dir():
         print(json.dumps({"error": "no sanctum", "sanctum": str(sanctum)}))
         return 1
@@ -341,10 +402,13 @@ def main(argv: list[str] | None = None) -> int:
             f"warning: {tokenizer['reason']}; token counts are chars//4 estimates",
             file=sys.stderr,
         )
+    born_on = birth_date(sanctum)
     report = {
         "sanctum": str(sanctum),
         "invoked_from": str(project_root),
         "born": (sanctum / BORN_MARKER).is_file(),
+        "born_on": born_on.isoformat() if born_on else None,
+        "missing_identity_files": missing_identity_files(sanctum),
         "checked_on": today.isoformat(),
         "tokenizer": tokenizer,
         "memory_md": measure_memory(sanctum, args.guardrail),
@@ -353,6 +417,10 @@ def main(argv: list[str] | None = None) -> int:
         "session_logs": stale_session_logs(sanctum, args.days, today),
         "index_drift": index_drift(sanctum),
     }
+    if born_undated(sanctum):
+        report["born_warning"] = BORN_UNDATED_NOTE
+    # Collected last, after every file has been read.
+    report["warnings"] = list(DECODE_WARNINGS)
     print(json.dumps(report, indent=2))
     return 0
 

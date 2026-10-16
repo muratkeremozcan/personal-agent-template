@@ -182,6 +182,8 @@ Wire them into the generated SKILL.md:
 - On every activation, run `uv run {skill-root}/scripts/wake.py {project-root}`.
 - FIRST_BREATH loads references/first-breath.md.
 - FIRST_BREATH_RESUME loads references/first-breath.md and preserves partial state.
+- DAMAGED and HOME_MISCONFIGURED stop the session: relay wake.py's message to the
+  owner and run nothing else until it is fixed. Neither loads first-breath.md.
 - WAKING uses the identity bundle emitted by wake.py.
 - A CURATION DUE block in wake.py's output loads references/curation-pass.md and
   runs the pass before the session ends. No block means the sanctum is healthy.

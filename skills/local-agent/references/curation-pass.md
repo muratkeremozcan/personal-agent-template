@@ -101,6 +101,9 @@ you have.
 The First Breath log is never pruned however stale it reads. Take which log that is from `.born`
 rather than from memory or from a filename written into this document, since a sanctum that was
 ever wiped and reborn carries a different date than any example would show.
+If waking or `curate.py` reports that `.born` carries no valid date, the exemption has nothing to
+match and the First Breath log shows up among the aged logs. Write the birth date into `.born` as
+`YYYY-MM-DD` before archiving or pruning anything; the bare-date log in `sessions/` carries it.
 
 **The identity files** are not prune targets. `PERSONA.md`, `CREED.md`, and `BOND.md` hold who you
 are, what you believe, and who you serve. Trim genuine duplication inside them, and move operational
