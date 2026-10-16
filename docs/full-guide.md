@@ -298,10 +298,14 @@ before committing. It must not add sanctum data or raw imports to the module.
 From the repository root:
 
 ```bash
-python3 -m unittest discover -s skills/local-agent/scripts/tests -v
+uv run --no-project --python 3.10 python -m unittest discover -s skills/local-agent/scripts/tests -v
 ```
 
-CI runs the same command on Python 3.10 and 3.13, plus `uvx ruff check .`.
+Python 3.10 is the oldest version the scripts support, and `uv` downloads it when it is missing.
+Stock macOS `python3` is 3.9, which fails the suite.
+
+CI runs the same command on Ubuntu and macOS with Python 3.10 and 3.15.
+It also runs every lifecycle script through `uv run` the way a user does, `uvx ruff check .`, and an offline check of the relative links in the docs.
 
 The suite verifies:
 
