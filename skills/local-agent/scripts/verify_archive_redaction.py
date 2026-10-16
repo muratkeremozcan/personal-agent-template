@@ -158,7 +158,8 @@ ANYWHERE_MARKERS = tuple(t for t in PREFIX_MARKERS if t not in PREFIX_ONLY_MARKE
 
 # "told me privately", "told Dana privately", "said privately". The words between the
 # verb and the adverb are usually a name, so a hit is reported by this label alone.
-PRIVATELY = re.compile(r"(?<![a-z0-9'])(?:told|said)(?:\s+[a-z][\w'-]*){0,3}?\s+privately\b")
+# Any script, so a name written in Cyrillic or CJK between the two words still counts.
+PRIVATELY = re.compile(r"(?<![a-z0-9'])(?:told|said)(?:\s+[^\W\d_][\w']*){0,3}?\s+privately\b")
 PRIVATELY_LABEL = "told or said ... privately"
 
 # Hyphens and dashes read as spaces for marker matching, so "Off-the-record" and

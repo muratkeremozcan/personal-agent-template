@@ -487,6 +487,9 @@ class MarkerTests(GateTestCase):
             "secret label": f"**Secret:** {secret}",
             "told a name privately": f"Omar told Dana privately that {secret}",
             "said privately": f"Omar said privately that {secret}",
+            "told a cyrillic name privately": (
+                f"Omar told \u0414\u0430\u043d\u0430 privately that {secret}"
+            ),
         }
         for label, line in cases.items():
             with self.subTest(label):
