@@ -1241,9 +1241,43 @@ def continuation(lines: list[str], i: int) -> str:
     return " ".join(v for v in value if v)
 
 
+def in_flow_container(prefix: str) -> bool:
+    """Whether a label that follows `prefix` sits inside an open `{...}` or `[...]`.
+    Brackets inside quotes and the `${` of a variable reference do not count."""
+    depth, quote = 0, ""
+    for i, ch in enumerate(prefix):
+        if quote:
+            quote = "" if ch == quote else quote
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "[" or (ch == "{" and prefix[i - 1 : i] != "$"):
+            depth += 1
+        elif ch in "}]" and depth:
+            depth -= 1
+    return depth > 0
+
+
+def split_flow_value(rest: str) -> tuple[str, str]:
+    """An unquoted value inside a flow container, and what follows it. The value ends at
+    the first `,`, `}` or `]` outside a `${...}` reference; without one it runs to the
+    end of the line and the tail is empty."""
+    i = 0
+    while i < len(rest):
+        if rest.startswith("${", i):
+            close = rest.find("}", i + 2)
+            if close < 0:
+                break
+            i = close + 1
+            continue
+        if rest[i] in ",}]":
+            return rest[:i].strip(), rest[i:]
+        i += 1
+    return rest.strip(), ""
+
+
 def classify_credential_value(rest: str, structured: bool, continued: str) -> bool:
     """Whether the text after a credential label holds a credential. `structured` is true
-    for a quoted (JSON-style) label, where a value ends at `,`, `}` or `]`.
+    for a label inside a flow container, where a value ends at `,`, `}` or `]`.
 
     The complete value is classified with every literal character kept. An exemption
     holds only when the whole remainder after the exempt token is permitted punctuation
@@ -1267,8 +1301,11 @@ def classify_credential_value(rest: str, structured: bool, continued: str) -> bo
         return not (exempt and tail_ok.fullmatch(tail))
     if BLOCK_INDICATOR.match(rest):
         return True
-    split = re.search(r"[,}\]]" if structured else r"[ \t]+#|[.;,]*[ \t]*$", rest)
-    token, tail = rest[: split.start()].strip(), rest[split.start() :]
+    if structured:
+        token, tail = split_flow_value(rest)
+    else:
+        split = re.search(r"[ \t]+#|[.;,]*[ \t]*$", rest)
+        token, tail = rest[: split.start()].strip(), rest[split.start() :]
     # Emphasis wrapped around the whole value is Markdown, so `_none_` is `none`.
     emphasis = EMPHASIS_VALUE.fullmatch(token)
     bare = emphasis.group("v") if emphasis else token
@@ -1290,7 +1327,7 @@ def labelled_credential(line: str, continued: str) -> bool:
         opener = re.search(r"(\*\*|__|\*|_)$", line[: m.start()])
         if opener and rest.startswith(opener.group(1)):
             rest = rest[len(opener.group(1)) :]
-        structured = bool(m.group("quote")) or "{" in line[: m.start()]
+        structured = in_flow_container(line[: m.start()])
         found = found or classify_credential_value(rest, structured, continued)
     return found
 

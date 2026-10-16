@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parent.parent / "verify_archive_redaction.py"
@@ -145,6 +146,17 @@ class GateTestCase(unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
                 code = gate.main([str(a) for a in args])
+            except SystemExit as exc:
+                code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def run_entrypoint(self, *args: Path | str) -> tuple[int, str, str]:
+        """Call entrypoint(), the CLI's exception boundary, in-process. An unexpected
+        exception there becomes exit 2 with a traceback on stderr."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = gate.entrypoint([str(a) for a in args])
             except SystemExit as exc:
                 code = exc.code
         return code, out.getvalue(), err.getvalue()
@@ -664,6 +676,139 @@ def fake(prefix: str, body: str) -> str:
 class CredentialShapeTests(GateTestCase):
     GHP = fake("gh" + "p_", "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345")
 
+    NAMED_SHAPES: ClassVar[dict[str, tuple[str, str]]] = {
+        "slack token": ("", fake("xo" + "xb-", "1234567890-abcdefghijklmnop")),
+        "slack webhook": (
+            "https://hooks.slack" + ".com/services/",
+            fake("T0123ABCD/", "B0123ABCD/abcdefghijklmnopqrstuvwx"),
+        ),
+        "github fine-grained token": (
+            "", fake("github" + "_pat_", "11ABCDEFG0123456789_abcdefghijklmnop")
+        ),
+        "gitlab token": ("", fake("gl" + "pat-", "abcdefghij0123456789")),
+        "openai or anthropic key": ("", fake("s" + "k-", "abcdefghijklmnopqrstuvwxyz0123")),
+        "stripe key": ("", fake("s" + "k_live_", "51HxAbCdEfGhIjKlMnOpQrSt")),
+        "npm token": ("", fake("np" + "m_", "abcdefghijklmnopqrstuvwxyz0123456789")),
+        "pypi token": ("", fake("py" + "pi-", "AgEIcHlwaS5vcmcCJGFiY2RlZmdoaWprbG1ub3Bx")),
+        "aws access key": ("", fake("AK" + "IA", "IOSFODNN7EXAMPLE")),
+        "aws session key id": ("", fake("AS" + "IA", "IOSFODNN7EXAMPLE")),
+        "aws secret access key": (
+            "aws_secret_access_key = ", fake("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY")
+        ),
+        "google api key": ("", fake("AI" + "za", "SyA-abcdefghijklmnopqrstuvwxyz01234")),
+        "jwt": (
+            "",
+            fake(
+                "ey" + "JhbGciOiJIUzI1NiJ9.",
+                "eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+            ),
+        ),
+        "private key block": ("", fake("-----BEGIN RSA ", "PRIVATE KEY-----")),
+        "bearer token": ("Bearer ", fake("abcdefghij", "klmnopqrstuvwxyz0123")),
+        "basic auth header": ("Authorization: Basic ", fake("YWRtaW46", "aHVudGVyMg==")),
+        "url with embedded password": (
+            "postgres://admin:", fake("S3cret", "Passw0rd") + "@db.prod.internal:5432/app"
+        ),
+        "password assignment": ("Staging admin password: ", fake("Tr0ub4", "dor&3-horse")),
+        "password alone on its line": ("password: ", fake("correct", "horsebattery")),
+        "passwd env": ("DB_PASSWD=", fake("hun", "ter22")),
+        "pwd label": ("pwd: ", fake("s3cr", "et!x")),
+        "passcode": ("**Passcode:** ", fake("8812", "-alpha")),
+        "secret assignment": ("secret = ", fake("abcd", "efgh")),
+        "api_key assignment": ('API_KEY="', fake("abcd", "1234") + '"'),
+        "client_secret assignment": ("client_secret: ", fake("x9Y8", "z7W6v5")),
+        "cookie header": ("cookie: ", fake("session=", "abcdefghijklmnopqrstuvwx")),
+        "oauth token or credentials file path": (
+            "", "~/.config/acme/application_default_credentials.json"
+        ),
+        "multiword passphrase": ("Password: ", fake("correct horse ", "battery staple")),
+        "json basic auth header": (
+            '{"Authorization": "Basic ', fake("dXNlcjpw", "YXNzd29yZA==") + '"}'
+        ),
+        "json password": ('{"password": "', fake("hunter", "22x") + '"}'),
+        "json cookie header": ('{"Cookie": "', fake("session=", "abcdefghijklmnop") + '"}'),
+        "yaml folded password": ("password: >-\n  ", fake("aBcdEF", "123456789")),
+        "yaml literal api_key": ("api_key: |\n  ", fake("abcd", "1234efgh")),
+        "api_key quoted null string": ('api_key: "', fake("nu", "ll") + '"'),
+        "env reference with a default": (
+            'password = "${DATABASE_PASSWORD:-', fake("hunter", "22") + '}"'
+        ),
+    }
+
+    PROSE_LINES = (
+        "Lena rotated the CI token and the deploy key on Friday.",
+        "Password: reset by IT on Friday after the audit.",
+        "Password: stored in the team vault.",
+        "Password: rotated on Friday, see the runbook.",
+        "password: none",
+        "Password: changed on 2026-05-04",
+        "Rotation: the client secret was replaced on Friday.",
+        "Clone with git@github.com:acme/acme-gateway.git as usual.",
+        "Docs live at https://docs.example.com/guide for reference.",
+    )
+
+    LABELLED_VALUES = (
+        "password: reset-6B4p!8Qz",
+        '{"password": "reset-6B4p!8Qz"}',
+        'password: "none"',
+        'password: "null"',
+        "Password: my battery horse staple",
+        "PIN: 1234",
+        "**PIN:** 4821",
+        "pin = 0000",
+        "token: abc123",
+        "access_token = abcdef",
+        "API key: hunter22",
+        "password: >- # production\n  aBcdEF123456789",
+        "password: |2-\n  aBcdEF123456789",
+        "password: |-2\n  aBcdEF123456789",
+        "password: |-\n  null",
+        "password:\n  aBcdEF123456789",
+        '{"api_key": null, "password": "hunter22"}',
+        "password: none, actually hunter22",
+        "Password: rotated",
+    )
+
+    WHOLE_VALUE_CREDENTIALS = (
+        "password: _null",
+        "password: ___",
+        'PASSWORD="${DATABASE_PASSWORD}"hunter2',
+        'PASSWORD=""hunter2',
+        'PASSWORD=""null',
+        'PASSWORD="null"x',
+        "PASSWORD=$DATABASE_PASSWORD'x'",
+        "password: null hunter2",
+        "password: **hunter2**",
+        '{"api_key": nullx}',
+    )
+
+    PUNCTUATED_EXEMPTIONS = (
+        'PASSWORD="${DATABASE_PASSWORD}" # loaded by the shell',
+        "password: _none_",
+        "**Password:** null",
+        '{"api_key": null }',
+        "api_key: ~;",
+    )
+
+    SYNTAX_ONLY_VALUES = (
+        "api_key: null",
+        "api_key: ~",
+        'api_key: ""',
+        'password = "${DATABASE_PASSWORD}"',
+        "PASSWORD=$DATABASE_PASSWORD",
+        'client_secret: "${OAUTH_CLIENT_SECRET}",',
+        "api_key: null # deliberately unset",
+        "api_key: Null",
+        '{"api_key": null}',
+        '{"api_key": ""}',
+        '{"password": "${DATABASE_PASSWORD}"}',
+        "password = None",
+        "password: <your-database-password>",
+        "The CI variable is secret=${CLIENT_SECRET}.",
+        "private_key: null",
+        "The SQL fragment is WHERE password IS NULL.",
+    )
+
     def test_github_token_in_note_fails_without_echoing_it(self):
         text = before_follow_up(NOTE, f"The CI token is {self.GHP} for now.")
         err = self.assert_fail(
@@ -674,64 +819,7 @@ class CredentialShapeTests(GateTestCase):
 
     def test_every_named_shape_fails_without_echoing_it(self):
         # label: (line as written in the note, the secret part of it)
-        cases = {
-            "slack token": ("", fake("xo" + "xb-", "1234567890-abcdefghijklmnop")),
-            "slack webhook": (
-                "https://hooks.slack" + ".com/services/",
-                fake("T0123ABCD/", "B0123ABCD/abcdefghijklmnopqrstuvwx"),
-            ),
-            "github fine-grained token": (
-                "", fake("github" + "_pat_", "11ABCDEFG0123456789_abcdefghijklmnop")
-            ),
-            "gitlab token": ("", fake("gl" + "pat-", "abcdefghij0123456789")),
-            "openai or anthropic key": ("", fake("s" + "k-", "abcdefghijklmnopqrstuvwxyz0123")),
-            "stripe key": ("", fake("s" + "k_live_", "51HxAbCdEfGhIjKlMnOpQrSt")),
-            "npm token": ("", fake("np" + "m_", "abcdefghijklmnopqrstuvwxyz0123456789")),
-            "pypi token": ("", fake("py" + "pi-", "AgEIcHlwaS5vcmcCJGFiY2RlZmdoaWprbG1ub3Bx")),
-            "aws access key": ("", fake("AK" + "IA", "IOSFODNN7EXAMPLE")),
-            "aws session key id": ("", fake("AS" + "IA", "IOSFODNN7EXAMPLE")),
-            "aws secret access key": (
-                "aws_secret_access_key = ", fake("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY")
-            ),
-            "google api key": ("", fake("AI" + "za", "SyA-abcdefghijklmnopqrstuvwxyz01234")),
-            "jwt": (
-                "",
-                fake(
-                    "ey" + "JhbGciOiJIUzI1NiJ9.",
-                    "eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
-                ),
-            ),
-            "private key block": ("", fake("-----BEGIN RSA ", "PRIVATE KEY-----")),
-            "bearer token": ("Bearer ", fake("abcdefghij", "klmnopqrstuvwxyz0123")),
-            "basic auth header": ("Authorization: Basic ", fake("YWRtaW46", "aHVudGVyMg==")),
-            "url with embedded password": (
-                "postgres://admin:", fake("S3cret", "Passw0rd") + "@db.prod.internal:5432/app"
-            ),
-            "password assignment": ("Staging admin password: ", fake("Tr0ub4", "dor&3-horse")),
-            "password alone on its line": ("password: ", fake("correct", "horsebattery")),
-            "passwd env": ("DB_PASSWD=", fake("hun", "ter22")),
-            "pwd label": ("pwd: ", fake("s3cr", "et!x")),
-            "passcode": ("**Passcode:** ", fake("8812", "-alpha")),
-            "secret assignment": ("secret = ", fake("abcd", "efgh")),
-            "api_key assignment": ('API_KEY="', fake("abcd", "1234") + '"'),
-            "client_secret assignment": ("client_secret: ", fake("x9Y8", "z7W6v5")),
-            "cookie header": ("cookie: ", fake("session=", "abcdefghijklmnopqrstuvwx")),
-            "oauth token or credentials file path": (
-                "", "~/.config/acme/application_default_credentials.json"
-            ),
-            "multiword passphrase": ("Password: ", fake("correct horse ", "battery staple")),
-            "json basic auth header": (
-                '{"Authorization": "Basic ', fake("dXNlcjpw", "YXNzd29yZA==") + '"}'
-            ),
-            "json password": ('{"password": "', fake("hunter", "22x") + '"}'),
-            "json cookie header": ('{"Cookie": "', fake("session=", "abcdefghijklmnop") + '"}'),
-            "yaml folded password": ("password: >-\n  ", fake("aBcdEF", "123456789")),
-            "yaml literal api_key": ("api_key: |\n  ", fake("abcd", "1234efgh")),
-            "api_key quoted null string": ('api_key: "', fake("nu", "ll") + '"'),
-            "env reference with a default": (
-                'password = "${DATABASE_PASSWORD:-', fake("hunter", "22") + '}"'
-            ),
-        }
+        cases = self.NAMED_SHAPES
         for label, (lead, secret) in cases.items():
             with self.subTest(label):
                 line = f"Recorded here:\n{lead}{secret}"
@@ -758,17 +846,7 @@ class CredentialShapeTests(GateTestCase):
         return gate.CREDENTIAL_LABEL_SHAPE if label.startswith(assignments) else label
 
     def test_prose_about_credentials_is_not_a_credential(self):
-        lines = (
-            "Lena rotated the CI token and the deploy key on Friday.",
-            "Password: reset by IT on Friday after the audit.",
-            "Password: stored in the team vault.",
-            "Password: rotated on Friday, see the runbook.",
-            "password: none",
-            "Password: changed on 2026-05-04",
-            "Rotation: the client secret was replaced on Friday.",
-            "Clone with git@github.com:acme/acme-gateway.git as usual.",
-            "Docs live at https://docs.example.com/guide for reference.",
-        )
+        lines = self.PROSE_LINES
         for line in lines:
             with self.subTest(line):
                 text = before_follow_up(NOTE, line)
@@ -778,27 +856,7 @@ class CredentialShapeTests(GateTestCase):
         # Each of these archived as clean: a status word glued to a password, a quoted
         # "none", a passphrase with a short first word, a PIN, and YAML block scalars in
         # every legal spelling, including one holding the string "null".
-        cases = (
-            "password: reset-6B4p!8Qz",
-            '{"password": "reset-6B4p!8Qz"}',
-            'password: "none"',
-            'password: "null"',
-            "Password: my battery horse staple",
-            "PIN: 1234",
-            "**PIN:** 4821",
-            "pin = 0000",
-            "token: abc123",
-            "access_token = abcdef",
-            "API key: hunter22",
-            "password: >- # production\n  aBcdEF123456789",
-            "password: |2-\n  aBcdEF123456789",
-            "password: |-2\n  aBcdEF123456789",
-            "password: |-\n  null",
-            "password:\n  aBcdEF123456789",
-            '{"api_key": null, "password": "hunter22"}',
-            "password: none, actually hunter22",
-            "Password: rotated",
-        )
+        cases = self.LABELLED_VALUES
         for line in cases:
             with self.subTest(line):
                 text = before_follow_up(CLEAN_NOTE, line)
@@ -814,18 +872,7 @@ class CredentialShapeTests(GateTestCase):
     def test_exemptions_hold_only_for_the_whole_value(self):
         # An underscore is a literal character, and text glued to a quoted placeholder
         # or an empty quoted string is shell concatenation that assigns it.
-        cases = (
-            "password: _null",
-            "password: ___",
-            'PASSWORD="${DATABASE_PASSWORD}"hunter2',
-            'PASSWORD=""hunter2',
-            'PASSWORD=""null',
-            'PASSWORD="null"x',
-            "PASSWORD=$DATABASE_PASSWORD'x'",
-            "password: null hunter2",
-            "password: **hunter2**",
-            '{"api_key": nullx}',
-        )
+        cases = self.WHOLE_VALUE_CREDENTIALS
         for line in cases:
             with self.subTest(line):
                 text = before_follow_up(CLEAN_NOTE, line)
@@ -836,17 +883,37 @@ class CredentialShapeTests(GateTestCase):
                 )
 
     def test_exempt_values_with_permitted_punctuation_pass(self):
-        for line in (
-            'PASSWORD="${DATABASE_PASSWORD}" # loaded by the shell',
-            "password: _none_",
-            "**Password:** null",
-            '{"api_key": null }',
-            "api_key: ~;",
-        ):
+        for line in self.PUNCTUATED_EXEMPTIONS:
             with self.subTest(line):
                 text = before_follow_up(CLEAN_NOTE, line)
                 source = before_follow_up(CLEAN_SOURCE, line)
                 self.assert_pass(self.gate(self.note(text), source=self.source(source)))
+
+    def test_quoted_yaml_keys_get_a_verdict(self):
+        # A quoted key outside any `{...}` once made the classifier expect a delimiter
+        # that was not there, and the gate crashed with exit 2. A `${...}` reference's
+        # closing brace was also read as the end of a flow mapping.
+        cases = {
+            '"password": null': 0,
+            "'password': None": 0,
+            '"api_key": ${API_KEY}': 0,
+            '"api_key": ""': 0,
+            '{"api_key": ${API_KEY}}': 0,
+            "Example {stage} password: null": 0,
+            '"password": hunter22x': 1,
+            "'api_key': hunter22x": 1,
+            '{"api_key": ${API_KEY}x}': 1,
+            '"api_key": ${API_KEY}x': 1,
+        }
+        for line, expected in cases.items():
+            with self.subTest(line):
+                text = before_follow_up(CLEAN_NOTE, line)
+                source = before_follow_up(CLEAN_SOURCE, line)
+                code, _, err = self.run_entrypoint(
+                    self.note(text), "--no-withheld", "--source", self.source(source)
+                )
+                self.assertEqual(code, expected, err)
+                self.assertNotIn("Traceback", err)
 
     def test_credential_rules_apply_inside_fenced_code(self):
         block = "```yaml\ndatabase:\n  password: >-\n    aBcdEF123456789\n  pin: 1234\n```"
@@ -868,24 +935,7 @@ class CredentialShapeTests(GateTestCase):
         # A typed null and a bare environment variable reference name where a secret
         # lives without holding one. --allow cannot clear a credential refusal, so a false
         # positive here would make an accurate configuration excerpt unarchivable.
-        lines = (
-            "api_key: null",
-            "api_key: ~",
-            'api_key: ""',
-            'password = "${DATABASE_PASSWORD}"',
-            "PASSWORD=$DATABASE_PASSWORD",
-            'client_secret: "${OAUTH_CLIENT_SECRET}",',
-            "api_key: null # deliberately unset",
-            "api_key: Null",
-            '{"api_key": null}',
-            '{"api_key": ""}',
-            '{"password": "${DATABASE_PASSWORD}"}',
-            "password = None",
-            "password: <your-database-password>",
-            "The CI variable is secret=${CLIENT_SECRET}.",
-            "private_key: null",
-            "The SQL fragment is WHERE password IS NULL.",
-        )
+        lines = self.SYNTAX_ONLY_VALUES
         for line in lines:
             with self.subTest(line):
                 text = before_follow_up(CLEAN_NOTE, line)
@@ -1085,6 +1135,43 @@ class FrontmatterSweepTests(GateTestCase):
             NOTE, "redacted: true\n", "tags: [rollout, coverage]\nredacted: true\n"
         )
         self.assert_pass(self.gate(self.note(text), self.redacted()))
+
+
+def quoted_key_variants(line: str) -> list[str]:
+    """A `key: value` or `key=value` line in its double-quoted, single-quoted and
+    flow-mapping spellings."""
+    match = re.match(r"(\w+)(\s*[:=].*)$", line)
+    if not match:
+        return []
+    key, rest = match.groups()
+    return [f'"{key}"{rest}', f"'{key}'{rest}", f'{{"{key}"{rest}}}', f"[{key}{rest}]"]
+
+
+class RobustnessTests(GateTestCase):
+    def test_no_corpus_case_crashes_the_gate(self):
+        # Every body line the suite uses, every fixture line, and the quoted-key and
+        # flow spellings of each, through the CLI's exception boundary. A crash is exit
+        # 2 with a traceback, which blocks the prune but hides the real verdict.
+        shapes = CredentialShapeTests
+        corpus = [lead + secret for lead, secret in shapes.NAMED_SHAPES.values()]
+        for group in (
+            shapes.PROSE_LINES, shapes.LABELLED_VALUES, shapes.WHOLE_VALUE_CREDENTIALS,
+            shapes.PUNCTUATED_EXEMPTIONS, shapes.SYNTAX_ONLY_VALUES,
+        ):
+            corpus += list(group)
+        for fixture in (NOTE, SOURCE, REDACTED):
+            corpus += [line for line in fixture.split("\n") if line.strip()]
+        corpus += [variant for line in list(corpus) for variant in quoted_key_variants(line)]
+        self.assertGreater(len(corpus), 200)
+        for line in corpus:
+            with self.subTest(line):
+                text = before_follow_up(CLEAN_NOTE, line)
+                source = before_follow_up(CLEAN_SOURCE, line)
+                code, _, err = self.run_entrypoint(
+                    self.note(text), "--no-withheld", "--source", self.source(source)
+                )
+                self.assertIn(code, (0, 1), err)
+                self.assertNotIn("Traceback", err)
 
 
 class FrontmatterSchemaTests(GateTestCase):
