@@ -5,6 +5,7 @@
 """Tests for install_global.py: user-level discovery links for the agent and its companions."""
 
 import contextlib
+import errno
 import importlib.util
 import io
 import os
@@ -55,27 +56,29 @@ def statuses(changes) -> list[tuple[Path, str]]:
     return [(change.destination, change.status) for change in changes]
 
 
+def race_restore(destination: Path):
+    """Create a real file at destination just before a quarantined entry is renamed back."""
+    original = install_global._rename_exclusive
+
+    def racing(source, target):
+        if target == destination and "install-quarantine" in source.name:
+            destination.write_text("created concurrently", encoding="utf-8")
+        return original(source, target)
+
+    return mock.patch.object(install_global, "_rename_exclusive", racing)
+
+
 @contextlib.contextmanager
 def fail_new_link_then_race_restore(destination: Path):
-    """Fail the new link at destination, then create a real file there just before rollback
-    recreates the old link."""
+    """Fail the new link at destination, then race rollback's restore of the old link."""
     original_symlink_to = Path.symlink_to
-    original_symlink = os.symlink
 
     def failing_symlink_to(path, target, target_is_directory=False):
         if path == destination:
             raise OSError(5, "simulated failure")
         return original_symlink_to(path, target, target_is_directory)
 
-    def racing_symlink(target, path, *args, **kwargs):
-        if Path(path) == destination:
-            destination.write_text("created concurrently", encoding="utf-8")
-        return original_symlink(target, path, *args, **kwargs)
-
-    with (
-        mock.patch.object(Path, "symlink_to", failing_symlink_to),
-        mock.patch.object(os, "symlink", racing_symlink),
-    ):
+    with mock.patch.object(Path, "symlink_to", failing_symlink_to), race_restore(destination):
         yield
 
 
@@ -362,7 +365,7 @@ class AliasedFolderTests(HomeTestCase):
         )
         self.assertIsNotNone(changes[1].alias_of)
         self.assert_one_physical_link()
-        self.assertEqual(list(self.home.rglob("*install-backup*")), [])
+        self.assertEqual(list(self.home.rglob("*install-quarantine*")), [])
 
     def test_refuses_aliases_that_would_link_to_different_sources(self):
         companion = write_skill(self.source.parent / "voice", "voice")
@@ -410,7 +413,7 @@ class ApplyTransactionTests(HomeTestCase):
     """apply() against a filesystem that changes after planning or fails mid-way."""
 
     def assert_no_backups(self) -> None:
-        self.assertEqual(list(self.home.rglob("*install-backup*")), [])
+        self.assertEqual(list(self.home.rglob("*install-quarantine*")), [])
 
     def test_successful_repoint_leaves_no_backup(self):
         self.link(".codex/skills/local-agent", "/nonexistent/local-agent")
@@ -522,21 +525,15 @@ class ApplyTransactionTests(HomeTestCase):
 
     def test_restore_keeps_a_file_created_just_before_the_restore(self):
         destination = self.link(".claude/skills/local-agent", "/nonexistent/old")
-        backup = destination.with_name("backup")
+        backup = destination.with_name(".local-agent.install-quarantine-test")
         destination.rename(backup)
-        original_symlink = os.symlink
 
-        def racing_symlink(target, path, *args, **kwargs):
-            if Path(path) == destination:
-                destination.write_text("created concurrently", encoding="utf-8")
-            return original_symlink(target, path, *args, **kwargs)
+        with race_restore(destination):
+            note = install_global._restore(backup, destination)
 
-        with (
-            mock.patch.object(os, "symlink", racing_symlink),
-            self.assertRaises(FileExistsError),
-        ):
-            install_global._restore(backup, destination)
-
+        self.assertEqual(
+            note, f"{destination}: now occupied by something else; previous entry kept at {backup}"
+        )
         self.assertEqual(destination.read_text(encoding="utf-8"), "created concurrently")
         self.assertEqual(os.readlink(backup), "/nonexistent/old")
 
@@ -547,12 +544,14 @@ class ApplyTransactionTests(HomeTestCase):
         occupied = self.home / "occupied"
         occupied.write_text("someone else's", encoding="utf-8")
 
-        with self.assertRaises(FileExistsError):
-            install_global._restore(backup, occupied)
+        note = install_global._restore(backup, occupied)
+        self.assertEqual(
+            note, f"{occupied}: now occupied by something else; previous entry kept at {backup}"
+        )
         self.assertEqual(occupied.read_text(encoding="utf-8"), "someone else's")
 
         free = self.home / "free"
-        install_global._restore(backup, free)
+        self.assertIsNone(install_global._restore(backup, free))
         self.assertEqual((free / "keep").read_text(encoding="utf-8"), "set aside")
         self.assertFalse(os.path.lexists(backup))
 
@@ -568,7 +567,7 @@ class ApplyTransactionTests(HomeTestCase):
 
         self.assertEqual(str(failure.exception.error), "[Errno 5] simulated failure")
         [leftover] = failure.exception.leftovers
-        [backup] = self.home.rglob("*install-backup*")
+        [backup] = self.home.rglob("*install-quarantine*")
         self.assertEqual(
             leftover,
             f"{destination}: now occupied by something else; previous entry kept at {backup}",
@@ -599,48 +598,13 @@ class ApplyTransactionTests(HomeTestCase):
         self.assertIsInstance(failure.exception.error, PermissionError)
         self.assertTrue(str(failure.exception).startswith(str(failure.exception.error)))
         [leftover] = failure.exception.leftovers
-        [backup] = second.parent.glob("*install-backup*")
+        [backup] = second.parent.glob("*install-quarantine*")
         self.assertTrue(leftover.startswith(f"{second}: could not restore"))
         self.assertTrue(leftover.endswith(f"; previous entry kept at {backup}"))
         self.assertEqual(os.readlink(backup), "/nonexistent/old2")
         self.assertEqual(os.readlink(first), "/nonexistent/old")
         self.assertFalse(os.path.lexists(self.home / ".agents"))
-        self.assertEqual(list(first.parent.glob("*install-backup*")), [])
-
-    def test_rollback_reports_a_restored_link_whose_backup_remains(self):
-        destination = self.link(".codex/skills/local-agent", "/nonexistent/old")
-        changes = install_global.plan(self.source, self.home)
-        original_symlink_to = Path.symlink_to
-        original_unlink = Path.unlink
-
-        def failing_symlink_to(path, target, target_is_directory=False):
-            if path == destination:
-                raise OSError(5, "simulated failure")
-            return original_symlink_to(path, target, target_is_directory)
-
-        def stuck_backup(path, *args, **kwargs):
-            if "install-backup" in path.name:
-                raise PermissionError(13, "simulated cleanup failure")
-            return original_unlink(path, *args, **kwargs)
-
-        with (
-            mock.patch.object(Path, "symlink_to", failing_symlink_to),
-            mock.patch.object(Path, "unlink", stuck_backup),
-            self.assertRaises(install_global.InstallIncomplete) as failure,
-        ):
-            install_global.apply(changes)
-
-        [backup] = destination.parent.glob("*install-backup*")
-        self.assertEqual(
-            failure.exception.leftovers,
-            [
-                (
-                    f"{backup}: {destination} was restored, but this backup remains"
-                    " ([Errno 13] simulated cleanup failure)"
-                ),
-            ],
-        )
-        self.assertEqual(os.readlink(destination), "/nonexistent/old")
+        self.assertEqual(list(first.parent.glob("*install-quarantine*")), [])
 
     def test_rollback_continues_past_an_entry_it_cannot_remove(self):
         old = self.link(".claude/skills/local-agent", "/nonexistent/old")
@@ -650,7 +614,7 @@ class ApplyTransactionTests(HomeTestCase):
         original_symlink_to = Path.symlink_to
 
         def stuck_unlink(path, *args, **kwargs):
-            if path == agents:
+            if path.parent == agents.parent and "install-quarantine" in path.name:
                 raise PermissionError(13, "simulated unlink failure")
             return original_unlink(path, *args, **kwargs)
 
@@ -667,14 +631,22 @@ class ApplyTransactionTests(HomeTestCase):
             install_global.apply(changes)
 
         self.assertEqual(str(failure.exception.error), "[Errno 5] simulated failure")
+        [holding] = agents.parent.glob("*install-quarantine*")
         self.assertEqual(
             failure.exception.leftovers,
-            [f"{agents}: could not remove the new link ([Errno 13] simulated unlink failure)"],
+            [
+                (
+                    f"{holding}: could not delete this run's link from {agents}"
+                    " ([Errno 13] simulated unlink failure)"
+                ),
+            ],
         )
+        self.assertEqual(os.readlink(holding), changes[1].target)
+        self.assertFalse(os.path.lexists(agents))
         self.assertEqual(os.readlink(old), "/nonexistent/old")
         self.assertFalse(os.path.lexists(self.home / ".codex"))
         self.assertFalse(os.path.lexists(self.home / ".gemini"))
-        self.assert_no_backups()
+        self.assertEqual(list(self.home.rglob("*install-quarantine*")), [holding])
 
     def test_refuses_when_an_aliased_parent_is_retargeted_after_planning(self):
         (self.home / ".claude").mkdir()
@@ -739,14 +711,14 @@ class ApplyTransactionTests(HomeTestCase):
         original_unlink = Path.unlink
 
         def stuck_backup(path, *args, **kwargs):
-            if "install-backup" in path.name:
+            if "install-quarantine" in path.name:
                 raise PermissionError(13, "simulated cleanup failure")
             return original_unlink(path, *args, **kwargs)
 
         with mock.patch.object(Path, "unlink", stuck_backup):
             warnings = install_global.apply(changes)
 
-        [backup] = self.home.rglob("*install-backup*")
+        [backup] = self.home.rglob("*install-quarantine*")
         self.assertEqual(
             warnings,
             [
@@ -776,6 +748,95 @@ class ApplyTransactionTests(HomeTestCase):
 
         install_global.install(self.source, self.home)
         self.assertEqual(len(links_under(self.home)), len(EXPECTED_SKILL_ROOTS))
+
+    @unittest.skipIf(install_global.fcntl is None, "no advisory locking on this platform")
+    def test_unsupported_lock_continues_with_a_warning(self):
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                install_global.fcntl, "flock", side_effect=OSError(errno.ENOTSUP, "not supported")
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            install_global.install(self.source, self.home)
+
+        self.assertEqual(
+            stderr.getvalue(),
+            f"warning: cannot lock {self.home} ([Errno {errno.ENOTSUP}] not supported);"
+            " this run is not serialized against other installs\n",
+        )
+        self.assertEqual(len(links_under(self.home)), len(EXPECTED_SKILL_ROOTS))
+
+    @unittest.skipIf(install_global.fcntl is None, "no advisory locking on this platform")
+    def test_lock_programming_errors_raise(self):
+        for code in (errno.EBADF, errno.EINVAL):
+            with (
+                self.subTest(errno=code),
+                mock.patch.object(install_global.fcntl, "flock", side_effect=OSError(code, "bad")),
+                self.assertRaises(OSError) as raised,
+            ):
+                install_global.install(self.source, self.home)
+            self.assertEqual(raised.exception.errno, code)
+            self.assertEqual(links_under(self.home), [])
+
+
+class RollbackInterleavingTests(HomeTestCase):
+    """Another writer replaces this run's new link with a real file while rollback runs."""
+
+    def setUp(self):
+        super().setUp()
+        changes = install_global.plan(self.source, self.home)
+        self.change = changes[0]
+        self.destination = self.change.destination
+        self.destination.parent.mkdir(parents=True)
+        self.destination.symlink_to(self.change.target)
+        self.journal = [("linked", self.destination, self.change.target)]
+
+    def replace_with_real_file(self) -> None:
+        os.unlink(self.destination)
+        self.destination.write_text("real file created by another actor", encoding="utf-8")
+
+    def assert_real_file_kept(self, leftovers: list[str]) -> None:
+        self.assertEqual(leftovers, [])
+        self.assertEqual(
+            self.destination.read_text(encoding="utf-8"), "real file created by another actor"
+        )
+        self.assertEqual(list(self.home.rglob("*install-quarantine*")), [])
+
+    def test_file_written_just_before_the_link_is_quarantined(self):
+        original = install_global._rename_exclusive
+        fired = []
+
+        def racing(source, target):
+            if source == self.destination and not fired:
+                fired.append(True)
+                self.replace_with_real_file()
+            return original(source, target)
+
+        with mock.patch.object(install_global, "_rename_exclusive", racing):
+            leftovers = install_global._roll_back(self.journal)
+
+        self.assertTrue(fired)
+        self.assert_real_file_kept(leftovers)
+
+    def test_file_written_just_before_the_quarantined_link_is_deleted(self):
+        """Codex's interleaving: the other writer acts immediately before rollback's unlink."""
+        original_unlink = Path.unlink
+        fired = []
+
+        def racing_unlink(path, *args, **kwargs):
+            if "install-quarantine" in path.name and not fired:
+                fired.append(True)
+                self.destination.write_text(
+                    "real file created by another actor", encoding="utf-8"
+                )
+            return original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", racing_unlink):
+            leftovers = install_global._roll_back(self.journal)
+
+        self.assertTrue(fired)
+        self.assert_real_file_kept(leftovers)
 
 
 class MainTests(unittest.TestCase):
@@ -942,7 +1003,7 @@ class MainTests(unittest.TestCase):
         original_unlink = Path.unlink
 
         def stuck_backup(path, *args, **kwargs):
-            if "install-backup" in path.name:
+            if "install-quarantine" in path.name:
                 raise PermissionError(13, "simulated cleanup failure")
             return original_unlink(path, *args, **kwargs)
 
@@ -951,7 +1012,7 @@ class MainTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(len(stdout.splitlines()), len(EXPECTED_SKILL_ROOTS))
-        [backup] = old.parent.glob("*install-backup*")
+        [backup] = old.parent.glob("*install-quarantine*")
         self.assertEqual(
             stderr,
             f"warning: {backup}: backup of a replaced link left behind"
@@ -966,7 +1027,7 @@ class MainTests(unittest.TestCase):
         with fail_new_link_then_race_restore(destination):
             code, stdout, stderr = self.run_main()
 
-        [backup] = destination.parent.glob("*install-backup*")
+        [backup] = destination.parent.glob("*install-quarantine*")
         self.assertEqual((code, stdout), (1, ""))
         self.assertEqual(
             stderr.splitlines(),

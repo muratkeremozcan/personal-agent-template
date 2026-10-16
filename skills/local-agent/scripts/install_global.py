@@ -25,13 +25,16 @@ reported with its previous target. --dry-run prints the same report and touches 
 Discovery folders that share one physical folder, such as ~/.agents symlinked to
 ~/.claude, get one link, and every path that reaches it is reported.
 
-Writing holds an advisory lock on the home directory, so two runs cannot interleave.
-An entry or folder that changed after planning is left as it is and refuses the install.
+Writing holds an advisory lock on the home directory, so two runs cannot interleave; a
+filesystem without flock runs unserialized and says so. Every removal, while installing
+or rolling back, first renames the entry to a unique quarantine name without replacing
+anything and inspects it there, so an entry another writer puts in place is never deleted
+or overwritten. An entry or folder that changed after planning refuses the install.
+
 The install commits once every discovery path resolves to its source. A failure before
-that point removes the links this run created and restores each replaced link without
-overwriting anything that appeared meanwhile; the run exits 1 and names any entry it
-could not recover together with where its previous version was kept. After the commit,
-a backup that cannot be deleted is reported as a warning and the run still exits 0.
+that point undoes the run's journal; the run exits 1 and names any entry it could not
+recover together with where its previous version was kept. After the commit, a
+quarantined old link that cannot be deleted is a warning and the run still exits 0.
 
 Expected layout of the agent repository:
 
@@ -81,6 +84,13 @@ DRY_RUN_LABELS = {"installed": "would install", "repointed": "would repoint"}
 RENAME_EXCL = 0x4
 RENAME_NOREPLACE = 0x1
 AT_FDCWD = -100
+
+# flock failures that mean the filesystem cannot lock; anything else is a bug.
+UNSUPPORTED_LOCK_ERRORS = {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOLCK}
+
+# Undo steps, newest last: ("folder", path, None), ("linked", path, target), and
+# ("moved", path, quarantine path).
+Journal = list[tuple[str, Path, Path | str | None]]
 
 
 class Change(NamedTuple):
@@ -295,17 +305,6 @@ def plan(source: Path, home: Path, force: bool = False) -> list[Change]:
     return changes
 
 
-def _make_parents(directory: Path) -> list[Path]:
-    """Create a directory and its missing parents, returning the ones created, deepest last."""
-    missing = []
-    probe = directory
-    while not os.path.lexists(probe):
-        missing.append(probe)
-        probe = probe.parent
-    directory.mkdir(parents=True, exist_ok=True)
-    return missing[::-1]
-
-
 def _is_link_to(path: Path, target: str | None) -> bool:
     return path.is_symlink() and os.readlink(path) == target
 
@@ -339,87 +338,61 @@ def _rename_exclusive(source: Path, destination: Path) -> None:
     raise OSError(code, os.strerror(code), str(destination))
 
 
-def _restore(backup: Path, destination: Path) -> str | None:
-    """Return a set-aside entry to its name, never replacing whatever is there now.
+def _quarantine_name(path: Path) -> Path:
+    return path.with_name(f".{path.name}.install-quarantine-{os.getpid()}-{secrets.token_hex(8)}")
 
-    A symlink is recreated from its target, which fails if anything holds the name, and
-    the backup is removed only after that succeeds. Returns a note when the entry is back
-    in place but its backup could not be removed.
+
+def _quarantine(path: Path, holding: Path) -> bool:
+    """Atomically move whatever is at path to holding; False when nothing was there.
+
+    Every removal goes through here, so an entry is inspected only after it is out of
+    the public name and nothing another writer puts at path can be deleted.
     """
-    if not backup.is_symlink():
-        _rename_exclusive(backup, destination)
-        return None
-    os.symlink(os.readlink(backup), destination)
     try:
-        backup.unlink()
+        _rename_exclusive(path, holding)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _restore(holding: Path, path: Path) -> str | None:
+    """Move a quarantined entry back without replacing anything; a note if it stays put."""
+    try:
+        _rename_exclusive(holding, path)
+    except FileExistsError:
+        return f"{path}: now occupied by something else; previous entry kept at {holding}"
     except OSError as error:
-        return f"{backup}: {destination} was restored, but this backup remains ({error})"
+        return f"{path}: could not restore ({error}); previous entry kept at {holding}"
     return None
 
 
-def _set_aside(change: Change) -> Path:
-    """Move the planned symlink to a backup name, refusing if it changed after planning."""
-    destination = change.destination
-    changed = f"{destination}: changed after planning; left as it is"
-    removed = f"{destination}: removed after planning; rerun the install"
-    if not os.path.lexists(destination):
-        raise InstallRefused([removed])
-    if not _is_link_to(destination, change.previous):
-        raise InstallRefused([changed])
-
-    backup = destination.with_name(
-        f".{destination.name}.install-backup-{os.getpid()}-{secrets.token_hex(8)}"
-    )
-    try:
-        os.rename(destination, backup)
-    except FileNotFoundError:
-        raise InstallRefused([removed]) from None
-    if not _is_link_to(backup, change.previous):
-        # Another actor replaced the link between the check and the rename.
-        try:
-            note = _restore(backup, destination)
-        except OSError as error:
-            note = f"{destination}: the entry found there was kept at {backup} ({error})"
-        if note:
-            raise InstallIncomplete(InstallRefused([changed]), [note])
-        raise InstallRefused([changed])
-    return backup
-
-
-def _roll_back(written: list[tuple[Change, Path | None]], created: list[Path]) -> list[str]:
-    """Undo this run's links, restore replaced ones, and remove directories it created.
-
-    Every entry gets its own recovery attempt; whatever cannot be recovered is returned
-    with the location of the entry it would have restored.
-    """
+def _roll_back(journal: Journal) -> list[str]:
+    """Undo journal entries newest first, each on its own, and list what stays unrecovered."""
     leftovers = []
-    for change, backup in reversed(written):
-        destination = change.destination
-        kept = f"; previous entry kept at {backup}" if backup else ""
+    for kind, path, detail in reversed(journal):
         try:
-            if _is_link_to(destination, change.target):
-                destination.unlink()
-        except OSError as error:
-            leftovers.append(f"{destination}: could not remove the new link ({error}){kept}")
-            continue
-        if backup is None:
-            continue
-        try:
-            note = _restore(backup, destination)
-            if note:
+            if kind == "folder":
+                with contextlib.suppress(FileNotFoundError):
+                    path.rmdir()
+            elif kind == "linked":
+                holding = _quarantine_name(path)
+                if not _quarantine(path, holding):
+                    continue
+                if not _is_link_to(holding, detail):
+                    if note := _restore(holding, path):
+                        leftovers.append(note)
+                    continue
+                try:
+                    holding.unlink()
+                except OSError as error:
+                    leftovers.append(
+                        f"{holding}: could not delete this run's link from {path} ({error})"
+                    )
+            elif os.path.lexists(detail) and (note := _restore(detail, path)):
                 leftovers.append(note)
-        except FileExistsError:
-            leftovers.append(f"{destination}: now occupied by something else{kept}")
         except OSError as error:
-            leftovers.append(f"{destination}: could not restore ({error}){kept}")
-    for directory in reversed(created):
-        try:
-            directory.rmdir()
-        except FileNotFoundError:
-            pass
-        except OSError as error:
-            if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
-                leftovers.append(f"{directory}: could not remove this run's folder ({error})")
+            if kind != "folder" or error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                leftovers.append(f"{path}: could not undo this run's {kind} entry ({error})")
     return leftovers
 
 
@@ -435,18 +408,43 @@ def _verify(changes: list[Change]) -> None:
         raise InstallRefused(unreachable)
 
 
+def _write(change: Change, journal: Journal) -> None:
+    """Make one planned link, journaling each step before it happens."""
+    destination = change.destination
+    missing = []
+    probe = destination.parent
+    while not os.path.lexists(probe):
+        missing.append(probe)
+        probe = probe.parent
+    for folder in reversed(missing):
+        with contextlib.suppress(FileExistsError):
+            folder.mkdir()
+            journal.append(("folder", folder, None))
+
+    if change.status == "repointed":
+        holding = _quarantine_name(destination)
+        journal.append(("moved", destination, holding))
+        if not _quarantine(destination, holding):
+            raise InstallRefused([f"{destination}: removed after planning; rerun the install"])
+        if not _is_link_to(holding, change.previous):
+            raise InstallRefused([f"{destination}: changed after planning; left as it is"])
+
+    journal.append(("linked", destination, change.target))
+    try:
+        destination.symlink_to(change.target, target_is_directory=change.source.is_dir())
+    except FileExistsError:
+        raise InstallRefused([f"{destination}: created by something else after planning"]) from None
+
+
 def apply(changes: list[Change]) -> list[str]:
     """Write the planned links as one transaction and return post-commit warnings.
 
-    Before writing, every logical destination's folder must still be the physical folder
-    it was at planning time. A replaced link is checked against the plan, moved to a
-    backup name, and checked again before its successor is created; a new link never
-    overwrites an entry that appeared after planning.
-
-    The install commits once every logical destination resolves to its source. A failure
-    before that point undoes this run's writes and restores the replaced links, and
-    raises InstallIncomplete listing anything that could not be recovered. Removing the
-    backups happens after the commit, so a failure there is returned as a warning.
+    Every logical destination's folder must still be the physical folder it was at
+    planning time. A replaced link is quarantined and checked against the plan before
+    its successor is created exclusively. The install commits once every logical
+    destination resolves to its source. A failure before that point rolls the journal
+    back and raises InstallIncomplete for anything it could not recover. Deleting the
+    quarantined old links happens after the commit, so a failure there is a warning.
     """
     stale = [
         f"{change.destination}: its folder changed after planning; rerun the install"
@@ -456,43 +454,25 @@ def apply(changes: list[Change]) -> list[str]:
     if stale:
         raise InstallRefused(stale)
 
-    written: list[tuple[Change, Path | None]] = []
-    created: list[Path] = []
+    journal: Journal = []
     try:
         for change in changes:
-            if change.status == "unchanged" or change.alias_of is not None:
-                continue
-            created.extend(_make_parents(change.destination.parent))
-            backup = _set_aside(change) if change.status == "repointed" else None
-            written.append((change, backup))
-            try:
-                change.destination.symlink_to(
-                    change.target, target_is_directory=change.source.is_dir()
-                )
-            except FileExistsError:
-                raise InstallRefused(
-                    [f"{change.destination}: created by something else after planning"]
-                ) from None
+            if change.status != "unchanged" and change.alias_of is None:
+                _write(change, journal)
         _verify(changes)
     except BaseException as error:
-        original, leftovers = error, []
-        if isinstance(error, InstallIncomplete):
-            original, leftovers = error.error, list(error.leftovers)
-        leftovers += _roll_back(written, created)
+        leftovers = _roll_back(journal)
         if leftovers:
-            raise InstallIncomplete(original, leftovers) from original
-        if original is not error:
-            raise original from None
+            raise InstallIncomplete(error, leftovers) from error
         raise
 
     warnings = []
-    for _, backup in written:
-        if backup is None:
-            continue
-        try:
-            backup.unlink()
-        except OSError as error:
-            warnings.append(f"{backup}: backup of a replaced link left behind ({error})")
+    for kind, _, holding in journal:
+        if kind == "moved":
+            try:
+                holding.unlink()
+            except OSError as error:
+                warnings.append(f"{holding}: backup of a replaced link left behind ({error})")
     return warnings
 
 
@@ -500,8 +480,8 @@ def apply(changes: list[Change]) -> list[str]:
 def install_lock(home: Path) -> Iterator[None]:
     """Hold an exclusive advisory lock on the home directory for one install run.
 
-    Locking the directory itself leaves nothing behind. Platforms without fcntl, and
-    filesystems that do not support flock, run unlocked.
+    Locking the directory itself leaves nothing behind. Without fcntl, or on a filesystem
+    that does not support flock, the run continues unserialized and says so on stderr.
     """
     if fcntl is None:
         yield
@@ -514,8 +494,13 @@ def install_lock(home: Path) -> Iterator[None]:
             message = f"{home}: another install_global run holds the install lock"
             raise InstallRefused([message]) from None
         except OSError as error:
-            if error.errno not in (errno.ENOLCK, errno.ENOTSUP, errno.EBADF, errno.EINVAL):
+            if error.errno not in UNSUPPORTED_LOCK_ERRORS:
                 raise
+            print(
+                f"warning: cannot lock {home} ({error}); this run is not serialized"
+                " against other installs",
+                file=sys.stderr,
+            )
         yield
     finally:
         os.close(descriptor)
