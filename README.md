@@ -256,6 +256,13 @@ Entity notes (one note per person, theme, or repository, linked from the archive
 - No memory store: `FIRST_BREATH` starts initialization.
 - Memory store without `.born`: `FIRST_BREATH_RESUME` continues initialization.
 - Memory store with `.born`: `WAKING` loads the identity and memory files.
+- Memory store missing any identity file: `DAMAGED` names the missing files and the Git commands that restore them, then exits 1.
+  A store that exists is never a birth, so a sync conflict or partial checkout cannot start a second First Breath over a real identity.
+- `LOCAL_AGENT_HOME` relative, or naming a directory that does not exist: `HOME_MISCONFIGURED` names the value and exits 1.
+  A new home starts with `mkdir`; inside an existing home, a missing memory store is a genuine `FIRST_BREATH`.
+
+`init-sanctum.py` builds the memory store in a staging folder beside it and renames it into place once every file is written.
+A run that fails leaves nothing at the memory store path, so running it again starts clean.
 
 Every wake also checks lightweight memory guardrails.
 When curation is due, the generated skill loads the curation instructions and runs the exact audit before making model-led edits.

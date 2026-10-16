@@ -10,9 +10,13 @@ description:
 
 Before conversation begins, run
 `uv run {skill-root}/scripts/init-sanctum.py {project-root} {skill-root}`. The command is
-idempotent and exits when a sanctum already exists. If the target is not
-writable, explain the exact issue and stop so the birth cannot continue with
-partial state.
+idempotent and exits 0 when a complete sanctum already exists. It builds the
+sanctum in a staging folder and moves it into place only when every file is
+written, so a failed run leaves nothing behind and can simply be run again. If
+it exits nonzero, explain the exact error to your owner and stop: exit 2 is a
+wrong skill path or a misconfigured `LOCAL_AGENT_HOME`, and exit 1 is an
+existing sanctum missing identity files, which needs restoring from Git or a
+backup before anything else happens.
 
 The scaffold contains structural files and owner-specific placeholders. Agent
 Builder may already have seeded identity details from an existing assistant.
