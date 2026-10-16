@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Tests for the archive tier: where aged logs go, and the gate on what may follow them.
+"""Tests for the archive tier: where aged logs go, and what stays behind on the machine.
 
 The behaviours worth pinning here are the ones where a wrong answer looks like a right
-one. An aged log reported with no destination reads as an instruction to delete. A
-redaction verifier that passes a leak is worse than no verifier, because it converts a
-manual check into false confidence.
+one. An aged log reported with no destination reads as an instruction to delete. An
+ignore rule that misses the withheld blocks pushes them to the git host with the rest of
+the sanctum. The redaction gate itself is tested in test_verify_archive_redaction.py.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,11 +17,10 @@ from datetime import date
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1]
+REPO = SCRIPTS.parents[2]
 sys.path.insert(0, str(SCRIPTS))
 
 import _sanctum  # noqa: E402
-
-VERIFIER = SCRIPTS / "verify_archive_redaction.py"
 
 
 class ArchiveRootTest(unittest.TestCase):
@@ -107,218 +107,64 @@ class ArchiveRootTest(unittest.TestCase):
         self.assertIn("/2026/01/", _sanctum.archive_target(name, Path("/a")))
 
 
-class RedactionGateTest(unittest.TestCase):
-    """Every case here is one the gate must refuse. A passing leak is the failure mode.
+class IgnoreRulesTest(unittest.TestCase):
+    """The repository is pushed to a git host, so .gitignore is part of what decides what
+    leaves the machine. sessions/redacted/ holds exactly the blocks the archive gate
+    withheld; references/archive.md promises it stays local."""
 
-    Each run builds the layout the archive procedure writes: the note under
-    <archive>/log/YYYY/MM/ and the withheld blocks in the sanctum's sessions/redacted/
-    under the source filename, so the structural checks pass and the case under test is
-    the only thing that can fail.
-    """
+    IGNORED = (
+        "_bmad/memory/local-agent/sessions/redacted/2026-05-04-topic.md",
+        "_bmad/memory/local-agent/knowledge/private/notes.md",
+        "_bmad/memory/local-agent/.runtime/state.json",
+        "config/oauth_token.json",
+        "application_default_credentials.json",
+        "service-account-prod.json",
+        "keys/id_rsa",
+        "keys/id_ed25519.pub",
+        "certs/client.p12",
+        "certs/client.pfx",
+        ".npmrc",
+        ".pypirc",
+        "imports/raw/export.json",
+        "imports/chatgpt/export-2026.zip",
+        ".env.local",
+    )
+    TRACKED = (
+        "_bmad/memory/local-agent/MEMORY.md",
+        "_bmad/memory/local-agent/sessions/2026-05-04-topic.md",
+        "_bmad/memory/local-agent/INDEX.md",
+        "imports/chatgpt/README.md",
+        "skills/local-agent/scripts/tests/fixtures/redaction/redacted.md",
+    )
+
+    def check_ignore(self, path: str) -> bool:
+        result = subprocess.run(
+            ["git", "-C", str(REPO), "check-ignore", "--no-index", "-q", path],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode not in (0, 1):
+            self.fail(f"git check-ignore failed for {path}: {result.stderr}")
+        return result.returncode == 0
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        root = Path(self._tmp.name)
-        self.archive = root / "archive"
-        self.archive.mkdir()
-        home = root / "home"
-        self.redacted_dir = home / "_bmad" / "memory" / "local-agent" / "sessions" / "redacted"
-        self.redacted_dir.mkdir(parents=True)
-        self.env = {
-            **os.environ, "LOCAL_AGENT_HOME": str(home), "LOCAL_AGENT_ARCHIVE": str(self.archive),
-        }
-
-    def tearDown(self):
-        self._tmp.cleanup()
-
-    def _note(self, text: str, name: str = "2026-05-04-topic.md") -> Path:
-        path = self.archive / "log" / "2026" / "05" / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        return path
-
-    def _gate(self, *args) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [sys.executable, str(VERIFIER), *map(str, args)],
-            capture_output=True, text=True, check=False, env=self.env,
+        if shutil.which("git") is None:
+            self.skipTest("git is not installed")
+        probe = subprocess.run(
+            ["git", "-C", str(REPO), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=False,
         )
+        if probe.returncode != 0 or Path(probe.stdout.strip()).resolve() != REPO.resolve():
+            self.skipTest("not running from a checkout of this repository")
 
-    def _run(self, archived: str, withheld: str, name="2026-05-04-topic.md", expect=None,
-             extra=()):
-        # The slug is the sanctum filename, so `source:` follows the name under test.
-        a = self._note(archived.replace("2026-05-04-topic", Path(name).stem), name)
-        w = self.redacted_dir / name
-        w.write_text(withheld, encoding="utf-8")
-        result = self._gate(a, w, "--quiet", *extra)
-        if expect is not None:
-            self.assertIn(expect, result.stderr)
-        return result.returncode
+    def test_private_material_is_ignored(self):
+        for path in self.IGNORED:
+            with self.subTest(path):
+                self.assertTrue(self.check_ignore(path), f"{path} would be committed")
 
-    WITHHELD = (
-        "## Withheld from 2026-05-04-topic.md\n\n"
-        "**Confidential:** Person A told Person B that Person C is leaving the company "
-        "at the end of the quarter.\n"
-    )
-    NOTICE = "> [!warning] Withheld from archive\n> 1 block withheld: personnel.\n"
-    CLEAN = (
-        "---\ntype: session-log\ndate: 2026-05-04\nsource: sessions/2026-05-04-topic.md\n"
-        "redacted: true\nredacted_count: 1\n---\n"
-        "# Topic\n\nOrdinary content.\n\n" + NOTICE
-    )
-
-    def test_clean_note_passes(self):
-        self.assertEqual(self._run(self.CLEAN, self.WITHHELD), 0)
-
-    def test_verbatim_leak_is_caught(self):
-        leaked = self.CLEAN + (
-            "\nPerson A told Person B that Person C is leaving the company at the end of "
-            "the quarter.\n"
-        )
-        self.assertEqual(
-            self._run(leaked, self.WITHHELD, expect="withheld sentence present"), 1
-        )
-
-    def test_missing_notice_is_caught(self):
-        # A silent hole reads as a complete record, which is worse than a visible gap.
-        silent = self.CLEAN.replace(self.NOTICE, "")
-        self.assertEqual(self._run(silent, self.WITHHELD, expect="no reader-visible"), 1)
-
-    def test_tainted_filename_is_caught(self):
-        # The filename never passes through the body gate, so a slug naming the subject
-        # leaks it even when every block was withheld.
-        self.assertEqual(
-            self._run(self.CLEAN, self.WITHHELD, name="2026-05-04-personc-leaving.md",
-                      expect="filename names a withheld subject"),
-            1,
-        )
-
-    def test_unreadable_input_fails_closed(self):
-        w = self.redacted_dir / "2026-05-04-topic.md"
-        w.write_text(self.WITHHELD, encoding="utf-8")
-        rc = self._gate(self.archive / "missing.md", w).returncode
-        # 2 rather than 1: a check that could not run must block the prune exactly
-        # as a failing one does, and must be distinguishable from a clean pass.
-        self.assertEqual(rc, 2)
-
-    def test_short_withheld_sentence_is_caught(self):
-        # Regression: a withheld sentence under the length floor once passed both the
-        # sentence check and the word-run check, so a termination and a severance figure
-        # archived verbatim. The token sweep is what closes this.
-        withheld = ("## Withheld from 2026-05-04-topic.md\n\n"
-                    "**Confidential:** PersonC was fired. Severance: 185000.\n")
-        leaked = self.CLEAN.replace("Ordinary content.",
-                                    "Ordinary content. PersonC was fired. Severance: 185000.")
-        self.assertEqual(self._run(leaked, withheld, expect="tokens from the withheld"), 1)
-
-    def test_entity_named_only_in_withheld_block_is_caught(self):
-        # Regression, and the leak this capability's own documentation calls the subtlest
-        # it can produce: the body shows nothing while the frontmatter announces who the
-        # withheld block was about. Only `source:` used to be checked.
-        withheld = ("## Withheld from 2026-05-04-topic.md\n\n"
-                    "**Confidential:** PersonD is being managed out after a review.\n")
-        note = self.CLEAN.replace("redacted: true",
-                                  'people: ["[[person/PersonD]]"]\nredacted: true')
-        self.assertEqual(self._run(note, withheld, expect="persond"), 1)
-
-    def test_allow_permits_a_genuine_collision(self):
-        # The sweep is deliberately biased toward flagging, so an escape hatch has to exist
-        # or a legitimate shared word makes an archive permanently unrunnable.
-        withheld = ("## Withheld from 2026-05-04-topic.md\n\n"
-                    "**Confidential:** PersonC was fired.\n")
-        leaked = self.CLEAN.replace("Ordinary content.", "Ordinary content. PersonC was fired.")
-        self.assertEqual(self._run(leaked, withheld), 1)
-        rc = self._run(leaked, withheld, extra=("--allow", "personc", "--allow", "fired"))
-        self.assertEqual(rc, 0)
-
-    def test_credential_shaped_value_is_caught_regardless_of_length(self):
-        # Regression: `PIN: 1234` is neither long prose nor seven words, so both
-        # thresholds missed it. Length was never the right axis for a secret.
-        withheld = ("## Withheld from 2026-05-04-topic.md\n\n"
-                    "**Confidential:** Access PIN: 1234.\n")
-        leaked = self.CLEAN.replace("Ordinary content.", "Ordinary content. PIN: 1234")
-        self.assertEqual(
-            self._run(leaked, withheld, expect="credential-shaped value from the withheld"), 1
-        )
-
-    def test_short_name_in_slug_is_caught(self):
-        # Regression: a four-character floor dropped short given names, which are
-        # exactly what a personnel redaction is about.
-        withheld = "## Withheld from x.md\n\n**Confidential:** Amy is departing next month.\n"
-        self.assertEqual(
-            self._run(self.CLEAN, withheld, name="2026-05-04-amy-departure.md",
-                      expect="filename names a withheld subject"),
-            1,
-        )
-
-    def test_concatenated_slug_is_caught(self):
-        # Regression: `personc-leaving` tokenises to "personc", matching neither
-        # "person" nor "c", so a subject travelled through by concatenation.
-        withheld = "## Withheld from x.md\n\n**Confidential:** Person C is leaving.\n"
-        self.assertEqual(
-            self._run(self.CLEAN, withheld, name="2026-05-04-personc-leaving.md",
-                      expect="filename names a withheld subject"),
-            1,
-        )
-
-    def test_non_latin_slug_is_caught(self):
-        # Regression: an ASCII tokeniser saw nothing in a CJK filename. Scripts with
-        # no case system always qualify as entities, because case cannot rule them out.
-        withheld = "## Withheld from x.md\n\n**Confidential:** \u5c71\u7530 was dismissed.\n"
-        self.assertEqual(
-            self._run(self.CLEAN, withheld, name="2026-05-04-\u5c71\u7530-dismissal.md",
-                      expect="filename names a withheld subject"),
-            1,
-        )
-
-    def test_common_word_does_not_fail_a_clean_slug(self):
-        # The other direction, and just as important: a gate that fails ordinary
-        # archives gets bypassed, which is a security outcome as much as a usability one.
-        withheld = "## Withheld from x.md\n\n**Confidential:** PersonD left the team.\n"
-        self.assertEqual(self._run(self.CLEAN, withheld, name="2026-05-04-team-update.md"), 0)
-
-    def test_block_scalar_source_is_checked(self):
-        # Regression: a line-prefix check never saw `source: >-` with the value on the
-        # following line, so a subject rode through valid YAML.
-        withheld = ("## Withheld from x.md\n\n"
-                    "**Confidential:** Project Nightingale closes Friday.\n")
-        note = self.CLEAN.replace(
-            "redacted: true",
-            "source: >-\n  sessions/2026-05-04-nightingale-close.md\nredacted: true")
-        self.assertEqual(
-            self._run(note, withheld, expect="provenance field names a withheld subject"), 1
-        )
-
-    def test_hidden_notice_does_not_satisfy_the_visible_rule(self):
-        # Regression: an HTML comment renders as nothing, so it is not a notice.
-        hidden = self.CLEAN.replace(self.NOTICE, "<!-- Withheld from archive -->\n")
-        self.assertEqual(self._run(hidden, self.WITHHELD, expect="no reader-visible"), 1)
-
-    def test_fenced_notice_does_not_satisfy_the_visible_rule(self):
-        fenced = self.CLEAN.replace(self.NOTICE, "```\n" + self.NOTICE + "```\n")
-        self.assertEqual(self._run(fenced, self.WITHHELD, expect="no reader-visible"), 1)
-
-    CLEAN_LOG = (
-        "---\ntype: session-log\ndate: 2026-05-04\nsource: sessions/2026-05-04-topic.md\n"
-        "redacted: false\n---\n# Topic\n\nNothing withheld here.\n"
-    )
-
-    def test_clean_log_verifies_without_a_redacted_file(self):
-        # A log with nothing withheld had no redacted file, so the mandatory step could
-        # not run and was skipped in practice. A skipped step is the escape a missed
-        # redaction needs, so the clean case asserts its claim explicitly.
-        rc = self._gate(self._note(self.CLEAN_LOG), "--no-withheld", "--quiet").returncode
-        self.assertEqual(rc, 0)
-
-    def test_clean_claim_contradicted_by_frontmatter_fails(self):
-        note = self.CLEAN_LOG.replace("redacted: false", "redacted: true")
-        result = self._gate(self._note(note), "--no-withheld", "--quiet")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("`redacted: true` but no redacted file", result.stderr)
-
-    def test_empty_withheld_file_fails_closed(self):
-        # An empty redacted file means the withheld material was lost. Passing here
-        # would let the source log be pruned, destroying the only remaining copy.
-        self.assertEqual(self._run(self.CLEAN, ""), 2)
+    def test_the_sanctum_itself_stays_tracked(self):
+        for path in self.TRACKED:
+            with self.subTest(path):
+                self.assertFalse(self.check_ignore(path), f"{path} would be ignored")
 
 
 if __name__ == "__main__":

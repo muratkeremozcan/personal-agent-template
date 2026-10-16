@@ -69,16 +69,18 @@ Sanctum session logs contain things the owner said in confidence: what a colleag
 about another colleague, a decision not yet announced, a number under embargo. The gate is
 what stands between that material and a durable copy. `references/archive.md` specifies how
 it decides, and `scripts/verify_archive_redaction.py` makes the outcome checkable rather than
-asserted: it re-reads both files off disk and fails on a surviving sentence, on a seven-word
-run that survived paraphrase, on a filename sharing distinctive tokens with the withheld
-text, and on a missing withheld notice. It exits 2 when it cannot run at all, which blocks
-the prune exactly as a failure does.
+asserted.
+It re-reads the archived note, the redacted file and the source log off disk.
+It fails on a surviving sentence, on a seven-word run that survived paraphrase, and on a word from the withheld text in the frontmatter, the filename, `source`, a notice path or an `Archived from` heading.
+It fails on a confidentiality marker or credential left in the note, on frontmatter outside the closed schema `references/archive.md` lists, on a source sentence that reached neither file, and on a missing withheld notice.
+It exits 2 when it cannot run at all, including when `--source` is missing, which blocks the prune exactly as a failure does.
 
 Three rules that are easy to get wrong and were, in a real deployment:
 
 - **Withheld material must go somewhere.** Withhold a block from the archive, then prune the
   source log, and it exists nowhere. It goes to `sessions/redacted/`, which `stale_logs`
   never sees because its glob is non-recursive.
+  The repository `.gitignore` keeps that folder off the git host, so it needs a backup of its own.
 - **Frontmatter is computed from the redacted text, never the source.** A person named only
   inside a withheld block would otherwise appear in `people:` and put the subject of the
   redaction onto the graph, in the copy that leaves the machine.

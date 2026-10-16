@@ -18,13 +18,27 @@ credentials/
 secrets/
 *.pem
 *.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*token*.json
+*credential*.json
+service-account*.json
+.npmrc
+.pypirc
 
-# Raw imports require review before versioning
+# Raw imports require review before versioning. An export archive is raw by definition.
 imports/raw/
+imports/**/*.zip
 
 # The sanctum at _bmad/memory/local-agent/ is intentionally tracked. It is the
 # owner's versioned identity and memory. Never add a blanket _bmad/memory/ ignore
 # rule without deciding how that continuity will be backed up.
+
+# Blocks the archive redaction gate withheld. references/archive.md: this folder never
+# leaves the machine, so a push must not carry it. It needs its own backup.
+_bmad/memory/local-agent/sessions/redacted/
 
 # Optional private knowledge stays on the current device unless moved manually.
 # This is an owner-maintained convention. It is not a security boundary.
@@ -36,7 +50,7 @@ _bmad/memory/local-agent/.runtime/
 # Per-machine overlays of shared config.
 *.local.json
 
-# Optional, when an Obsidian vault serves as the archive: per-device window state
-# and plugin files that hold credentials.
+# When the archive is an Obsidian vault inside this repository, enabling these is the
+# owner's choice: per-device window state, and a plugin file that holds an API key.
 # archive/.obsidian/workspace*.json
 # archive/.obsidian/plugins/obsidian-local-rest-api/data.json
