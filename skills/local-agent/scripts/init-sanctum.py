@@ -328,10 +328,6 @@ def build_sanctum(
     # Copy and substitute template files
     for template_name in TEMPLATE_FILES:
         template_path = assets_dir / template_name
-        if not template_path.exists():
-            print(f"  Warning: template {template_name} not found, skipping")
-            continue
-
         # Remove "-template" from the output filename and uppercase it
         output_name = template_name.replace("-template", "").upper()
         # Fix extension casing: .MD -> .md
@@ -377,6 +373,16 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"error: {skill_path} is not a local-agent skill directory: "
             f"missing {', '.join(f'{d}/' for d in absent)}",
+            file=sys.stderr,
+        )
+        return 2
+    # Each template becomes an identity file, so a bundle missing one would publish
+    # a sanctum that wake.py reports as DAMAGED on its very first run.
+    absent = [t for t in TEMPLATE_FILES if not (skill_path / "assets" / t).is_file()]
+    if absent:
+        print(
+            f"error: the skill bundle at {skill_path} is incomplete: missing "
+            f"{', '.join(f'assets/{t}' for t in absent)}. Restore the bundle and run this again.",
             file=sys.stderr,
         )
         return 2
@@ -456,6 +462,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Building sanctum in {staging}")
     try:
         build_sanctum(staging, skill_path, variables, sanctum_refs_path)
+        incomplete = missing_identity_files(staging)
+        if incomplete:
+            shutil.rmtree(staging)
+            print(
+                f"error: the scaffold built from {skill_path} is missing "
+                f"{', '.join(incomplete)}, so nothing was published. Restore the skill "
+                "bundle and run this again.",
+                file=sys.stderr,
+            )
+            return 2
         # One rename publishes the whole scaffold. It refuses a non-empty target, so a
         # sanctum another run finished meanwhile is never overwritten.
         os.replace(staging, sanctum)

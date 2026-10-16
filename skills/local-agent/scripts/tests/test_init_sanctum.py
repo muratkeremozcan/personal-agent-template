@@ -175,6 +175,21 @@ class FailureTests(InitCase):
         self.assertEqual(code, 0, err)
         self.assertTrue((self.sanctum / "CAPABILITIES.md").is_file())
 
+    def test_an_incomplete_build_is_never_published(self):
+        real_build = init_sanctum.build_sanctum
+
+        def build_without_capabilities(staging, *args):
+            real_build(staging, *args)
+            (staging / "CAPABILITIES.md").unlink()
+
+        with mock.patch.object(init_sanctum, "build_sanctum", build_without_capabilities):
+            code, out, err = self.run_init()
+        self.assertEqual(code, 2)
+        self.assertIn("is missing CAPABILITIES.md, so nothing was published", err)
+        self.assertNotIn("scaffolding complete", out)
+        self.assertFalse(os.path.lexists(self.sanctum))
+        self.assertEqual(list(self.sanctum.parent.iterdir()), [])
+
     def test_stale_staging_from_a_killed_run_is_removed(self):
         stale = self.sanctum.parent / "local-agent.partial-4242-deadbeef"
         (stale / "references").mkdir(parents=True)

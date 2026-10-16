@@ -6,6 +6,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -100,6 +101,49 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(retried.returncode, 0, msg=f"init retry: {retried.stderr}")
         self.assertNotIn("Skipping", retried.stdout, msg="init retry")
         self.assertIn("MODE: FIRST_BREATH_RESUME", self.wake().stdout, msg="wake after retry")
+
+    def test_a_bundle_missing_a_template_publishes_nothing(self):
+        """A pruned bundle once published a sanctum without CREED.md and exited 0."""
+        templates = sorted(p.name for p in (SKILL_ROOT / "assets").glob("*-template.md"))
+        self.assertEqual(len(templates), 5, msg="template inventory")
+        for template in templates:
+            with self.subTest(template=template), tempfile.TemporaryDirectory() as tmp:
+                bundle = Path(tmp) / "local-agent"
+                for folder in ("assets", "references", "scripts"):
+                    shutil.copytree(
+                        SKILL_ROOT / folder, bundle / folder,
+                        ignore=shutil.ignore_patterns("tests", "__pycache__"),
+                    )
+                held = Path(tmp) / template
+                (bundle / "assets" / template).rename(held)
+
+                failed = self.init(skill=bundle)
+                self.assertEqual(failed.returncode, 2, msg=f"init without {template}")
+                self.assertIn(template, failed.stderr, msg=f"init stderr without {template}")
+                self.assertNotIn("Traceback", failed.stderr, msg=f"init without {template}")
+                self.assertFalse(
+                    os.path.lexists(self.sanctum), msg=f"sanctum after init without {template}"
+                )
+                self.assertEqual(
+                    list(self.sanctum.parent.glob("*")) if self.sanctum.parent.exists() else [],
+                    [],
+                    msg=f"staging left after init without {template}",
+                )
+                self.assertIn(
+                    "MODE: FIRST_BREATH\n", self.wake().stdout, msg=f"wake without {template}"
+                )
+
+                held.rename(bundle / "assets" / template)
+                restored = self.init(skill=bundle)
+                self.assertEqual(
+                    restored.returncode, 0, msg=f"init after restoring {template}: "
+                    f"{restored.stderr}"
+                )
+                self.assertIn(
+                    "MODE: FIRST_BREATH_RESUME", self.wake().stdout,
+                    msg=f"wake after restoring {template}",
+                )
+                shutil.rmtree(self.sanctum)
 
     def test_a_damaged_sanctum_is_never_reborn(self):
         self.assertEqual(self.init().returncode, 0, msg="init")
