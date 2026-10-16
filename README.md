@@ -114,10 +114,12 @@ git remote set-url origin <private-repository-url>
 git push -u origin main
 ```
 
-If you use another location, set `LOCAL_AGENT_HOME` to its absolute path before running the agent:
+If you use another location, set `LOCAL_AGENT_HOME` to its absolute path before running the agent.
+The scripts stop with `HOME_MISCONFIGURED` when that directory does not exist, so create it right after the export:
 
 ```bash
 export LOCAL_AGENT_HOME=/absolute/path/to/local-agent
+mkdir -p "$LOCAL_AGENT_HOME"
 ```
 
 ### 2. Install BMad Builder
