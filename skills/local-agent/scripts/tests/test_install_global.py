@@ -55,7 +55,9 @@ def statuses(changes) -> list[tuple[Path, str]]:
     return [(change.destination, change.status) for change in changes]
 
 
-class InstallGlobalTests(unittest.TestCase):
+class HomeTestCase(unittest.TestCase):
+    """A scratch home directory holding an agent repository at ~/agent-repo."""
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -80,6 +82,8 @@ class InstallGlobalTests(unittest.TestCase):
         destination.symlink_to(target)
         return destination
 
+
+class InstallGlobalTests(HomeTestCase):
     def test_discovery_roots_are_the_documented_ones(self):
         self.assertEqual(
             tuple(str(path) for path in install_global.SKILL_DIRECTORIES), EXPECTED_SKILL_ROOTS
@@ -272,6 +276,227 @@ class InstallGlobalTests(unittest.TestCase):
             install_global.install(self.source, self.home)
 
 
+class AliasedFolderTests(HomeTestCase):
+    """Discovery folders that reach one physical folder through a symlinked parent."""
+
+    def alias_agents_to_claude(self, target: str = ".claude") -> None:
+        (self.home / ".claude").mkdir()
+        (self.home / ".agents").symlink_to(target)
+
+    def assert_one_physical_link(self) -> None:
+        self.assertEqual(
+            links_under(self.home),
+            [
+                self.home / ".agents",
+                self.home / ".claude/skills/local-agent",
+                self.home / ".codex/skills/local-agent",
+                self.home / ".gemini/config/skills/local-agent",
+            ],
+        )
+        for root in EXPECTED_SKILL_ROOTS:
+            self.assertEqual((self.home / root / "local-agent").resolve(), self.source)
+
+    def test_installs_one_link_and_reports_the_alias(self):
+        self.alias_agents_to_claude()
+
+        changes = install_global.install(self.source, self.home)
+
+        claude = self.home / ".claude/skills/local-agent"
+        self.assertEqual(
+            statuses(changes),
+            [(self.home / root / "local-agent", "installed") for root in EXPECTED_SKILL_ROOTS],
+        )
+        self.assertEqual(changes[1].alias_of.destination, claude)
+        self.assertEqual(changes[1].target, changes[0].target)
+        self.assertEqual(
+            install_global.describe(changes[1]),
+            f"installed: {self.home / '.agents/skills/local-agent'} -> {changes[0].target}"
+            f" (same path as {claude})",
+        )
+        self.assert_one_physical_link()
+
+    def test_second_run_reports_every_logical_path_unchanged(self):
+        self.alias_agents_to_claude()
+        first = install_global.install(self.source, self.home)
+
+        second = install_global.install(self.source, self.home)
+
+        self.assertEqual(
+            statuses(second), [(change.destination, "unchanged") for change in first]
+        )
+
+    def test_repoints_a_dangling_link_once(self):
+        self.alias_agents_to_claude()
+        old = "/nonexistent/old-checkout/local-agent"
+        self.link(".claude/skills/local-agent", old)
+
+        changes = install_global.install(self.source, self.home)
+
+        self.assertEqual(
+            [(change.status, change.previous) for change in changes[:2]],
+            [("repointed", old), ("repointed", old)],
+        )
+        self.assertIsNotNone(changes[1].alias_of)
+        self.assert_one_physical_link()
+        self.assertEqual(list(self.home.rglob("*install-backup*")), [])
+
+    def test_refuses_aliases_that_would_link_to_different_sources(self):
+        companion = write_skill(self.source.parent / "voice", "voice")
+
+        def colliding_key(destination: Path):
+            return str(destination.parent), destination.name.replace("voice", "local-agent")
+
+        with (
+            mock.patch.object(install_global, "_physical_key", colliding_key),
+            self.assertRaises(install_global.InstallRefused) as refusal,
+        ):
+            install_global.install(self.source, self.home)
+
+        self.assertEqual(
+            refusal.exception.conflicts,
+            [
+                f"{self.home / root / 'voice'}: same path as {self.home / root / 'local-agent'},"
+                f" which links to {self.source}; cannot also link to {companion}"
+                for root in EXPECTED_SKILL_ROOTS
+            ],
+        )
+        self.assertEqual(links_under(self.home), [])
+
+    def test_case_probe_matches_the_filesystem(self):
+        (self.home / "Probe").write_text("", encoding="utf-8")
+
+        self.assertEqual(
+            install_global._case_insensitive(self.home), (self.home / "pROBE").exists()
+        )
+
+    def test_case_aliased_parent_gets_one_link(self):
+        (self.home / "Probe").write_text("", encoding="utf-8")
+        if not (self.home / "pROBE").exists():
+            self.skipTest("filesystem is case-sensitive")
+        (self.home / "Probe").unlink()
+        self.alias_agents_to_claude(".CLAUDE")
+
+        changes = install_global.install(self.source, self.home)
+
+        self.assertIsNotNone(changes[1].alias_of)
+        self.assert_one_physical_link()
+
+
+class ApplyTransactionTests(HomeTestCase):
+    """apply() against a filesystem that changes after planning or fails mid-way."""
+
+    def assert_no_backups(self) -> None:
+        self.assertEqual(list(self.home.rglob("*install-backup*")), [])
+
+    def test_successful_repoint_leaves_no_backup(self):
+        self.link(".codex/skills/local-agent", "/nonexistent/local-agent")
+
+        install_global.install(self.source, self.home)
+
+        self.assert_no_backups()
+
+    def test_keeps_a_real_file_that_replaced_the_planned_link(self):
+        destination = self.link(".codex/skills/local-agent", str(self.other_checkout()))
+        changes = install_global.plan(self.source, self.home, force=True)
+        destination.unlink()
+        destination.write_text("written after planning", encoding="utf-8")
+
+        with self.assertRaises(install_global.InstallRefused) as refusal:
+            install_global.apply(changes)
+
+        self.assertEqual(
+            refusal.exception.conflicts, [f"{destination}: changed after planning; left as it is"]
+        )
+        self.assertEqual(destination.read_text(encoding="utf-8"), "written after planning")
+        self.assertEqual(links_under(self.home), [])
+        self.assertFalse(os.path.lexists(self.home / ".claude"))
+        self.assertFalse(os.path.lexists(self.home / ".agents"))
+        self.assert_no_backups()
+
+    def test_keeps_a_link_retargeted_after_planning(self):
+        destination = self.link(".codex/skills/local-agent", "/nonexistent/first")
+        changes = install_global.plan(self.source, self.home)
+        destination.unlink()
+        destination.symlink_to("/nonexistent/second")
+
+        with self.assertRaises(install_global.InstallRefused):
+            install_global.apply(changes)
+
+        self.assertEqual(os.readlink(destination), "/nonexistent/second")
+        self.assertEqual(links_under(self.home), [destination])
+        self.assert_no_backups()
+
+    def test_refuses_when_the_planned_link_disappears(self):
+        destination = self.link(".codex/skills/local-agent", "/nonexistent/first")
+        changes = install_global.plan(self.source, self.home)
+        destination.unlink()
+
+        with self.assertRaises(install_global.InstallRefused) as refusal:
+            install_global.apply(changes)
+
+        self.assertIn("removed after planning", refusal.exception.conflicts[0])
+        self.assertEqual(links_under(self.home), [])
+
+    def test_keeps_a_file_created_at_a_planned_new_link(self):
+        changes = install_global.plan(self.source, self.home)
+        destination = self.home / ".codex/skills/local-agent"
+        destination.parent.mkdir(parents=True)
+        destination.write_text("created after planning", encoding="utf-8")
+
+        with self.assertRaises(install_global.InstallRefused) as refusal:
+            install_global.apply(changes)
+
+        self.assertEqual(
+            refusal.exception.conflicts,
+            [f"{destination}: created by something else after planning"],
+        )
+        self.assertEqual(destination.read_text(encoding="utf-8"), "created after planning")
+        self.assertEqual(links_under(self.home), [])
+        self.assertFalse(os.path.lexists(self.home / ".claude"))
+        self.assertFalse(os.path.lexists(self.home / ".agents"))
+
+    def test_failed_replacement_restores_the_old_link_and_undoes_earlier_writes(self):
+        destination = self.link(".codex/skills/local-agent", "/nonexistent/old-checkout")
+        original_symlink_to = Path.symlink_to
+
+        def failing_symlink_to(path, target, target_is_directory=False):
+            if path == destination:
+                raise OSError(5, "simulated failure")
+            return original_symlink_to(path, target, target_is_directory)
+
+        with (
+            mock.patch.object(Path, "symlink_to", failing_symlink_to),
+            self.assertRaisesRegex(OSError, "simulated failure"),
+        ):
+            install_global.install(self.source, self.home)
+
+        self.assertEqual(os.readlink(destination), "/nonexistent/old-checkout")
+        self.assertEqual(links_under(self.home), [destination])
+        self.assertFalse(os.path.lexists(self.home / ".claude"))
+        self.assertFalse(os.path.lexists(self.home / ".agents"))
+        self.assert_no_backups()
+
+    def test_interrupt_mid_apply_undoes_earlier_writes(self):
+        original_symlink_to = Path.symlink_to
+        calls = []
+
+        def interrupted_symlink_to(path, target, target_is_directory=False):
+            calls.append(path)
+            if len(calls) == 3:
+                raise KeyboardInterrupt
+            return original_symlink_to(path, target, target_is_directory)
+
+        with (
+            mock.patch.object(Path, "symlink_to", interrupted_symlink_to),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            install_global.install(self.source, self.home)
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(links_under(self.home), [])
+        self.assertEqual(sorted(p.name for p in self.home.iterdir()), ["agent-repo"])
+
+
 class MainTests(unittest.TestCase):
     """main() in process, with the home directory and agent source pointed at a scratch tree."""
 
@@ -386,6 +611,26 @@ class MainTests(unittest.TestCase):
         self.assertEqual((code, stdout), (2, ""))
         self.assertIn("file where a directory is needed", stderr)
 
+    def test_dry_run_reports_an_aliased_folder_once_per_logical_path(self):
+        (self.home / ".claude").mkdir()
+        (self.home / ".agents").symlink_to(".claude")
+
+        code, stdout, stderr = self.run_main("--dry-run")
+
+        self.assertEqual((code, stderr), (0, ""))
+        claude = self.home / ".claude/skills/local-agent"
+        self.assertEqual(
+            stdout.splitlines()[:2],
+            [
+                f"would install: {claude} -> ../../agent-repo/skills/local-agent",
+                (
+                    f"would install: {self.home / '.agents/skills/local-agent'}"
+                    f" -> ../../agent-repo/skills/local-agent (same path as {claude})"
+                ),
+            ],
+        )
+        self.assertEqual(os.listdir(self.home / ".claude"), [])
+
     def test_force_repoints_another_checkout(self):
         other = write_skill(self.home / "other-repo" / "skills" / "local-agent", "local-agent")
         foreign = self.home / ".claude/skills/local-agent"
@@ -410,43 +655,56 @@ class MainTests(unittest.TestCase):
         self.assertIn("install failed: SKILL.md is missing", stderr)
 
 
-class ScriptTests(unittest.TestCase):
+class ScriptTests(HomeTestCase):
     """The script as a user runs it: copied into a finished agent repo, HOME set to scratch."""
 
+    def setUp(self):
+        super().setUp()
+        self.scripts = self.source / "scripts"
+        self.scripts.mkdir()
+        for name in ("install_global.py", "_sanctum.py"):
+            shutil.copy2(SCRIPTS / name, self.scripts / name)
+
+    def run_script(self, *argv: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(self.scripts / "install_global.py"), *argv],
+            env=dict(os.environ, HOME=str(self.home)),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def test_cli_installs_into_the_invoking_home_and_refuses_conflicts(self):
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory).resolve()
-            source = write_skill(home / "agent-repo" / "skills" / "local-agent", "local-agent")
-            scripts = source / "scripts"
-            scripts.mkdir()
-            for name in ("install_global.py", "_sanctum.py"):
-                shutil.copy2(SCRIPTS / name, scripts / name)
-            env = dict(os.environ, HOME=str(home))
+        help_run = self.run_script("--help")
+        self.assertEqual(help_run.returncode, 0, help_run.stderr)
+        self.assertIn("usage:", help_run.stdout)
+        self.assertEqual(links_under(self.home), [])
 
-            def run(*argv: str):
-                return subprocess.run(
-                    [sys.executable, str(scripts / "install_global.py"), *argv],
-                    env=env, capture_output=True, text=True, check=False,
-                )
+        first = self.run_script()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        link = self.home / ".claude" / "skills" / "local-agent"
+        self.assertEqual(link.resolve(), self.source)
+        self.assertIn(f"installed: {link} -> ", first.stdout)
 
-            help_run = run("--help")
-            self.assertEqual(help_run.returncode, 0, help_run.stderr)
-            self.assertIn("usage:", help_run.stdout)
-            self.assertEqual(links_under(home), [])
+        conflict = self.home / ".codex" / "skills" / "local-agent"
+        conflict.unlink()
+        conflict.mkdir()
+        second = self.run_script()
+        self.assertEqual(second.returncode, 2)
+        self.assertIn(f"{conflict}: real directory", second.stderr)
+        self.assertEqual(second.stdout, "")
 
-            first = run()
-            self.assertEqual(first.returncode, 0, first.stderr)
-            link = home / ".claude" / "skills" / "local-agent"
-            self.assertEqual(link.resolve(), source)
-            self.assertIn(f"installed: {link} -> ", first.stdout)
+    def test_cli_installs_through_an_aliased_discovery_folder(self):
+        (self.home / ".claude").mkdir()
+        (self.home / ".agents").symlink_to(".claude")
 
-            conflict = home / ".codex" / "skills" / "local-agent"
-            conflict.unlink()
-            conflict.mkdir()
-            second = run()
-            self.assertEqual(second.returncode, 2)
-            self.assertIn(f"{conflict}: real directory", second.stderr)
-            self.assertEqual(second.stdout, "")
+        result = self.run_script()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), len(EXPECTED_SKILL_ROOTS))
+        self.assertIn("(same path as ", result.stdout)
+        for root in EXPECTED_SKILL_ROOTS:
+            self.assertEqual((self.home / root / "local-agent").resolve(), self.source)
 
 
 if __name__ == "__main__":

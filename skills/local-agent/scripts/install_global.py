@@ -22,6 +22,11 @@ whole, exits 2, and leaves the machine exactly as it was when any destination:
 A symlink into this checkout, or one whose target no longer exists, is repointed and
 reported with its previous target. --dry-run prints the same report and touches nothing.
 
+Discovery folders that share one physical folder, such as ~/.agents symlinked to
+~/.claude, get one link, and every path that reaches it is reported. Writing is one
+transaction: a link that changed after planning is left alone and refuses the install,
+and any failure undoes every write made by the run.
+
 Expected layout of the agent repository:
 
     skills/local-agent/     the agent itself (must contain SKILL.md)
@@ -30,7 +35,9 @@ Expected layout of the agent repository:
 """
 
 import argparse
+import contextlib
 import os
+import secrets
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -65,6 +72,7 @@ class Change(NamedTuple):
     source: Path
     target: str
     previous: str | None = None
+    alias_of: "Change | None" = None  # the change that writes this path's physical entry
 
 
 class InstallRefused(RuntimeError):
@@ -128,37 +136,95 @@ def _parent_conflicts(home: Path, destination: Path) -> list[str]:
     return []
 
 
+def _case_insensitive(directory: Path) -> bool:
+    """Whether names under this directory fold case, probed without writing anything.
+
+    Looks up one existing entry under its swapped-case spelling, walking up the tree
+    while it stays on the same filesystem.
+    """
+    device = directory.stat().st_dev
+    probe = directory
+    while True:
+        with os.scandir(probe) as entries:
+            name = next((e.name for e in entries if e.name.swapcase() != e.name), None)
+        if name is not None:
+            try:
+                return os.path.samestat(
+                    os.lstat(probe / name), os.lstat(probe / name.swapcase())
+                )
+            except FileNotFoundError:
+                return False
+        if probe.parent == probe or probe.parent.stat().st_dev != device:
+            return False
+        probe = probe.parent
+
+
+def _physical_key(destination: Path) -> tuple[int, int, tuple[str, ...]]:
+    """Identity of the directory entry a destination names.
+
+    Two discovery paths that reach one folder through a symlinked or case-aliased parent
+    share a key: the inode of their deepest existing directory plus the names below it.
+    """
+    existing = destination.parent
+    tail = [destination.name]
+    while not existing.is_dir():
+        tail.insert(0, existing.name)
+        existing = existing.parent
+    if _case_insensitive(existing):
+        tail = [part.casefold() for part in tail]
+    status = existing.stat()
+    return status.st_dev, status.st_ino, tuple(tail)
+
+
 def plan(source: Path, home: Path, force: bool = False) -> list[Change]:
     """Decide every link the install would make, or raise InstallRefused listing every conflict."""
     source = source.resolve(strict=True)
     repository = source.parent.parent
     changes: list[Change] = []
     conflicts: dict[str, None] = {}
+    claimed: dict[tuple[int, int, tuple[str, ...]], Change] = {}
 
     for directories, name, discovered in discover_sources(source):
         link_source = discovered.resolve(strict=True)
         for directory in directories:
             destination = home / directory / name
+            key = _physical_key(destination)
+
+            primary = claimed.get(key)
+            if primary is not None:
+                if primary.source != link_source:
+                    conflicts[
+                        f"{destination}: same path as {primary.destination},"
+                        f" which links to {primary.source}; cannot also link to {link_source}"
+                    ] = None
+                else:
+                    changes.append(primary._replace(destination=destination, alias_of=primary))
+                continue
+
             target = os.path.relpath(link_source, start=destination.parent.resolve())
 
             if destination.is_symlink():
                 previous = os.readlink(destination)
                 current = _live_target(destination)
                 if current == link_source:
-                    changes.append(Change(destination, "unchanged", link_source, previous))
+                    change = Change(destination, "unchanged", link_source, previous)
+                    claimed[key] = change
+                    changes.append(change)
                     continue
                 if current is not None and not _is_within(current, repository) and not force:
                     conflicts[
                         f"{destination}: links into another checkout ({previous});"
                         " rerun with --force to repoint it"
                     ] = None
-                changes.append(Change(destination, "repointed", link_source, target, previous))
+                change = Change(destination, "repointed", link_source, target, previous)
             elif os.path.lexists(destination):
                 kind = "directory" if destination.is_dir() else "file"
                 conflicts[f"{destination}: real {kind}; only symlinks are replaced"] = None
                 continue
             else:
-                changes.append(Change(destination, "installed", link_source, target))
+                change = Change(destination, "installed", link_source, target)
+            claimed[key] = change
+            changes.append(change)
 
             # Only destinations that will be written need a creatable, writable parent.
             for conflict in _parent_conflicts(home, destination):
@@ -169,15 +235,95 @@ def plan(source: Path, home: Path, force: bool = False) -> list[Change]:
     return changes
 
 
-def apply(changes: list[Change]) -> None:
-    """Write the planned links."""
-    for change in changes:
-        if change.status == "unchanged":
-            continue
-        change.destination.parent.mkdir(parents=True, exist_ok=True)
-        if change.status == "repointed":
+def _make_parents(directory: Path) -> list[Path]:
+    """Create a directory and its missing parents, returning the ones created, deepest last."""
+    missing = []
+    probe = directory
+    while not os.path.lexists(probe):
+        missing.append(probe)
+        probe = probe.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    return missing[::-1]
+
+
+def _is_link_to(path: Path, target: str | None) -> bool:
+    return path.is_symlink() and os.readlink(path) == target
+
+
+def _set_aside(change: Change) -> Path:
+    """Move the planned symlink to a backup name, refusing if it changed after planning."""
+    destination = change.destination
+    backup = destination.with_name(
+        f".{destination.name}.install-backup-{os.getpid()}-{secrets.token_hex(4)}"
+    )
+    try:
+        os.rename(destination, backup)
+    except FileNotFoundError:
+        message = f"{destination}: removed after planning; rerun the install"
+        raise InstallRefused([message]) from None
+    if not _is_link_to(backup, change.previous):
+        leftover = _restore(backup, destination)
+        raise InstallRefused([leftover or f"{destination}: changed after planning; left as it is"])
+    return backup
+
+
+def _restore(backup: Path, destination: Path) -> str | None:
+    """Move a backup back into place, or explain why it had to stay where it is."""
+    if os.path.lexists(destination):
+        return f"{destination} is occupied, so its previous entry was kept at {backup}"
+    os.rename(backup, destination)
+    return None
+
+
+def _roll_back(written: list[tuple[Change, Path | None]], created: list[Path]) -> list[str]:
+    """Undo this run's links, restore replaced ones, and remove directories it created."""
+    leftovers = []
+    for change, backup in reversed(written):
+        if _is_link_to(change.destination, change.target):
             change.destination.unlink()
-        change.destination.symlink_to(change.target, target_is_directory=change.source.is_dir())
+        if backup is not None:
+            leftover = _restore(backup, change.destination)
+            if leftover:
+                leftovers.append(leftover)
+    for directory in reversed(created):
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+    return leftovers
+
+
+def apply(changes: list[Change]) -> None:
+    """Write the planned links as one transaction.
+
+    A replaced link is moved to a backup name and checked against the plan before its
+    successor is created, and a new link never overwrites an entry that appeared after
+    planning. Any failure undoes every write made by this run before it propagates.
+    """
+    written: list[tuple[Change, Path | None]] = []
+    created: list[Path] = []
+    try:
+        for change in changes:
+            if change.status == "unchanged" or change.alias_of is not None:
+                continue
+            created.extend(_make_parents(change.destination.parent))
+            backup = _set_aside(change) if change.status == "repointed" else None
+            written.append((change, backup))
+            try:
+                change.destination.symlink_to(
+                    change.target, target_is_directory=change.source.is_dir()
+                )
+            except FileExistsError:
+                raise InstallRefused(
+                    [f"{change.destination}: created by something else after planning"]
+                ) from None
+    except BaseException as error:
+        leftovers = _roll_back(written, created)
+        if leftovers:
+            raise RuntimeError(f"{error}; rollback incomplete: {'; '.join(leftovers)}") from error
+        raise
+
+    for _, backup in written:
+        if backup is not None:
+            backup.unlink()
 
 
 def install(source: Path, home: Path, force: bool = False) -> list[Change]:
@@ -193,6 +339,8 @@ def describe(change: Change, dry_run: bool = False) -> str:
     line = f"{label}: {change.destination} -> {change.target}"
     if change.status == "repointed":
         line += f" (was -> {change.previous})"
+    if change.alias_of is not None:
+        line += f" (same path as {change.alias_of.destination})"
     return line
 
 
