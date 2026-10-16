@@ -69,10 +69,11 @@ Sanctum session logs contain things the owner said in confidence: what a colleag
 about another colleague, a decision not yet announced, a number under embargo. The gate is
 what stands between that material and a durable copy. `references/archive.md` specifies how
 it decides, and `scripts/verify_archive_redaction.py` makes the outcome checkable rather than
-asserted: it re-reads both files off disk and fails on a surviving sentence, on a seven-word
-run that survived paraphrase, on a filename sharing distinctive tokens with the withheld
-text, and on a missing withheld notice. It exits 2 when it cannot run at all, which blocks
-the prune exactly as a failure does.
+asserted.
+It re-reads the archived note, the redacted file and the source log off disk.
+It fails on a surviving sentence, on a seven-word run that survived paraphrase, and on a word from the withheld text in the frontmatter, the filename, `source`, a notice path or an `Archived from` heading.
+It fails on a confidentiality marker or credential shape left in the note, on a source sentence that reached neither file, and on a missing withheld notice.
+It exits 2 when it cannot run at all, including when `--source` is missing, which blocks the prune exactly as a failure does.
 
 Three rules that are easy to get wrong and were, in a real deployment:
 

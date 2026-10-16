@@ -206,14 +206,18 @@ characters, list bullets (`-`, `*`, `+`, or `1.`), and markdown emphasis charact
 first bolded span or the first clause up to a colon. It is a marker when that span contains any of
 these tokens, matched case-insensitively:
 
-`confidential` · `never repeat` · `do not repeat` · `do not share` · `not for sharing` ·
-`do not put in` · `do not surface` · `never surface` · `off the record` · `keep this between` ·
-`keep it confidential` · `in confidence` · `private` · `sensitive` · `internal only` · `nda` ·
-`under embargo` · `unannounced` · `between us` · `stays between` · `don't tell` · `do not tell` ·
-`keep this quiet` · `not to be shared` · `off books` · `eyes only`
+`confidential` · `never repeat` · `do not repeat` · `don't repeat` · `do not share` ·
+`don't share` · `not for sharing` · `do not put in` · `do not surface` · `never surface` ·
+`off the record` · `keep this between` · `keep it confidential` · `in confidence` · `private` ·
+`sensitive` · `secret` · `internal only` · `nda` · `under embargo` · `unannounced` · `between us` ·
+`stays between` · `don't tell` · `do not tell` · `keep this quiet` · `not to be shared` ·
+`off books` · `eyes only`
 
-`scripts/verify_archive_redaction.py` scans the archived note for exactly these tokens, so the list
-above and its `PREFIX_MARKERS` stay identical; change both together.
+`confidential` also matches `confidentially` and `confidentiality`.
+Hyphens and dashes read as spaces, so `Off-the-record` and `internal–only` match `off the record` and `internal only`.
+
+`scripts/verify_archive_redaction.py` scans the archived note for exactly these tokens.
+The list above and its `PREFIX_MARKERS` stay identical, and a test compares them; change both together.
 
 **This list is illustrative. It is a floor.** Any phrasing that implies the writer expected the
 material to stay put counts as a marker, whether or not its words appear above. "A colleague said this
@@ -249,12 +253,12 @@ instance in the sanctum through untouched.
 Also treat a block as marked when a marker phrase appears mid-sentence inside it: "asked them to keep
 it confidential", "never surface in", "he told me privately", "this stays between us", "don't tell
 anyone", "keep this quiet", "not to be shared". The real example carries three such phrases in four
-lines. These are examples of a shape; match the intent. The verifier treats every token in the list
-above as a marker wherever it sits in a sentence, plus "told me privately" and "told us privately".
-Bare `private` and `sensitive` count only in the prefix, because ordinary prose uses them ("the
-private repo", "sensitive data"). Markers inside HTML comments and code fences count too, since they
-sync with the file whether or not they render. A note that uses a marker phrase in ordinary prose
-fails the check; reword the line or withhold it.
+lines. These are examples of a shape; match the intent.
+The verifier treats every token in the list above as a marker wherever it sits in a sentence, plus "told" or "said" followed within three words by "privately" ("told me privately", "told Dana privately", "said privately").
+Bare `private`, `sensitive` and `secret` count only in the prefix, because ordinary prose uses them ("the private repo", "sensitive data", "rotated the client secret").
+Markers inside HTML comments and code fences count too, since they sync with the file whether or not they render.
+So do markers in frontmatter values: a `summary:` that opens "Confidential, do not share:" fails exactly like the same line in the body.
+A note that uses a marker phrase in ordinary prose fails the check; reword the line or withhold it.
 
 **What gets withheld is the whole block**, defined by where the marker sits:
 
@@ -341,12 +345,14 @@ the copy that syncs off the machine.
 
 ### What the automated gate cannot do
 
-The gate matches text. It catches a withheld sentence reproduced (with or without its label, and
-through changes to punctuation, case, emphasis, diacritics, look-alike letters and invisible
-characters), a long word run that survived light rewording, a credential-shaped value, a
-confidentiality marker left in the note, an entity name reaching the filename or the frontmatter,
-and, with `--source`, a source sentence that reached neither the note nor the redacted file. It
-matches text only and has no model of meaning.
+The gate matches text.
+It catches a withheld sentence reproduced (with or without its label, and through changes to punctuation, case, emphasis, diacritics, look-alike letters and invisible characters), a long word run that survived light rewording, and a credential-shaped value.
+It catches a confidentiality marker left in the note body or in a frontmatter value.
+It catches a word from the withheld text reaching the frontmatter (every key, `tags` included; `type`, `date`, `redacted`, `redacted_count` and `source_withheld` are exempt only while they hold exactly `session-log`, an ISO date, `true` or `false`, or a count), the filename, `source`, a notice path, an `Archived from` heading, or a `sessions/` path in the prose.
+It catches a source sentence that reached neither the note nor the redacted file.
+It matches text only and has no model of meaning.
+
+Its failure messages locate each problem by line number and print no withheld text: a word from the withheld text is shown as `<withheld>` or by its length, because the report is read by a model and often pasted onward.
 
 A review demonstrated the gap by archiving "Leadership plans Friday cancellation for
 Nightingale; Jordan employment will end" against withheld text saying Nightingale would be
@@ -381,10 +387,9 @@ the owner what happened.
   endpoints, session identifiers. Withhold under `security` with no further analysis. An agent's own
   `CAPABILITIES.md` tends to accumulate exactly this, because recording how to reach a service is
   useful and recording the credential alongside it is the path of least resistance. Assume the
-  material is present and spend one rule on it. The verifier fails a note carrying a known token
-  shape (Slack, GitHub, GitLab, OpenAI and Anthropic keys, AWS access keys, Google API keys, JWTs,
-  private key blocks, bearer tokens, cookie headers, token and credential file paths) and names
-  the shape and line without printing the value.
+  material is present and spend one rule on it.
+  The verifier fails a note carrying a known credential shape and names the shape and line without printing the value.
+  The shapes: Slack tokens and webhooks; GitHub, GitLab, npm and PyPI tokens; OpenAI, Anthropic, Stripe and Google API keys; AWS access key IDs (`AKIA` and `ASIA`) and secret access keys; JWTs; private key blocks; bearer tokens and `Authorization: Basic` headers; cookie headers; URLs carrying a password (`postgres://user:password@host`); labelled `password`, `passwd`, `pwd`, `passcode`, `secret`, `api_key` and `client_secret` assignments; and token and credential file paths.
 - **Nothing is deleted before it is shown.** Report the withheld list to the owner, by file and category,
   before any sanctum log is pruned. They are the only one who can tell you a withheld block was fine
   or a passed block was not.
@@ -433,11 +438,13 @@ The sequence is the safety property. Run it in this order and never compress it.
    When nothing was withheld there is no redacted file, so pass `--no-withheld` in its place:
    `uv run scripts/verify_archive_redaction.py <archive-note> --no-withheld --source <source-log>`.
    The note must then state `redacted: false`.
+   Passing both `--no-withheld` and a redacted file exits 2.
 
-   `--source` names the log step 9 is about to prune. With it, the script confirms every sentence
-   of that log survives in the archive note or in the redacted file, and that every redacted
-   sentence occurs verbatim in the log. A withheld block that never reached `sessions/redacted/`
-   is caught here, before step 9 destroys it. The script also fails on a confidentiality marker or
+   `--source` is required in both forms, and the script exits 2 without it.
+   It names the log step 9 is about to prune.
+   The script confirms every sentence of that log survives in the archive note or in the redacted file, and that every redacted sentence occurs verbatim in the log.
+   A withheld block that never reached `sessions/redacted/` is caught here, before step 9 destroys it.
+   The script also fails on a confidentiality marker or
    credential shape left in the note, a note outside `<archive>/log/YYYY/MM/` or with a slug that
    does not start with its `date`, frontmatter carrying both or neither of `source` and
    `source_withheld`, a redacted file not named after the source, and notices or `redacted_count`

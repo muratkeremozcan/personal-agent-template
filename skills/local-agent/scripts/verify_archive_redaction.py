@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.10"
 # ///
 """Assert that an archived note leaks nothing the redaction gate withheld.
 
@@ -21,15 +21,18 @@ Run it as step 7 of the archive sequence, before the source log is pruned:
 
 When nothing was withheld, omit the redacted file and pass --no-withheld; the note must
 then say `redacted: false`, and the marker, credential, structure and source checks still
-run. ``--source`` names the sanctum log that is about to be pruned. When it is given,
-every sentence of the source must survive in the archived note or in the redacted file,
-so a withheld block that never reached the redacted file is caught before the prune
-destroys it.
+run. ``--source`` is required. It names the sanctum log that is about to be pruned, and
+every sentence of it must survive in the archived note or in the redacted file, so a
+withheld block that never reached the redacted file is caught before the prune destroys
+it.
 
 Exit 0 means every check passed. Exit 1 means a leak or a broken invariant was found and
 the archive must be rolled back. Exit 2 means the check could not run, which is also a
 failure: the sequence fails closed, so an unrunnable check blocks the prune exactly like
 a failed one. An unexpected exception exits 2 for the same reason.
+
+Failure messages locate a problem by line number and print no withheld text: a report
+is read by a model and often pasted onward, so it must not become a second copy.
 
 The script never writes anything.
 """
@@ -43,6 +46,7 @@ import traceback
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date as Date
+from functools import cached_property
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -83,15 +87,26 @@ end ends ended start starts started keep keeps kept
 """.split()  # noqa: SIM905
 )
 
-# Frontmatter keys whose values are structural rather than content. Their words are not
-# evidence of a leak.
-STRUCTURAL_KEYS = frozenset(
-    {"type", "date", "redacted", "redacted_count", "tags", "source_withheld"}
-)
+# Frontmatter keys that hold structure, each with the exact shape its value takes. A value
+# of that shape carries no words worth sweeping. Any other value is swept like prose: a
+# review carried withheld names through `type:`, a `date:` suffix and `source_withheld:`,
+# all of which this list once exempted whatever they held.
+# `tags` is absent on purpose. Tags are free text and always swept.
+STRUCTURAL_SHAPES = {
+    "type": re.compile(r"session-log"),
+    "date": re.compile(r"\d{4}-\d{2}-\d{2}"),
+    "redacted": re.compile(r"true|false", re.IGNORECASE),
+    "redacted_count": re.compile(r"\d+"),
+    "source_withheld": re.compile(r"true|false", re.IGNORECASE),
+}
 
 # Provenance keys, which are copies of the sanctum filename. They are checked against the
-# withheld entities (see entity_candidates) and kept out of the prose token sweep.
+# withheld identifiers in their own pass, which names the right fix (a re-slug), and kept
+# out of the prose token sweep.
 PROVENANCE_KEYS = frozenset({"source", "source_path", "origin"})
+
+# Words every sanctum path carries. They name the folder layout and are never evidence.
+PATH_WORDS = frozenset({"sessions", "redacted", "log", "md"})
 
 # A digit run this long is an identifier, an amount, or a date-like figure. Exactly the
 # shape of the thing worth withholding, so digits are checked rather than skipped.
@@ -99,14 +114,18 @@ MIN_DIGIT_TOKEN = 4
 
 # A run of this many consecutive words from a withheld block appearing in the archived note
 # is treated as a leak even when no whole sentence matched. Catches a rewritten sentence
-# that kept the incriminating clause. The upper bound exists because a very long run
-# matches nothing and silently switches the check off.
+# that kept the incriminating clause. The lower bound exists because a run of two common
+# words matches every archive; the upper bound exists because a very long run matches
+# nothing and silently switches the check off.
 SHINGLE_WORDS = 7
+MIN_SHINGLE_WORDS = 3
 MAX_SHINGLE_WORDS = 12
 
-# How many characters of a leaked sentence a failure message reprints. Enough to find the
-# line, short enough that the report is not a second copy of the block.
-PREVIEW_CHARS = 60
+# What a failure message prints in place of a token taken from the withheld text.
+WITHHELD_PLACEHOLDER = "<withheld>"
+
+# How many lost source sentences are listed one by one before the rest are counted.
+MAX_LOST_LISTED = 10
 
 # The closed vocabulary a withheld notice may name. references/archive.md, section 3.
 CATEGORIES = frozenset(
@@ -116,23 +135,48 @@ CATEGORIES = frozenset(
 # Marker tokens from references/archive.md, section 1. A token found in a line's prefix
 # (its first bold span, or its first clause up to a colon) marks the line. The document
 # calls the list illustrative; this is the executable floor beneath the model's judgment.
-# Keep the two lists identical.
+# Keep the two lists identical; a test parses the document and compares them.
 PREFIX_MARKERS = (
-    "confidential", "never repeat", "do not repeat", "do not share", "not for sharing",
-    "do not put in", "do not surface", "never surface", "off the record",
-    "keep this between", "keep it confidential", "in confidence", "private", "sensitive",
-    "internal only", "nda", "under embargo", "unannounced", "between us", "stays between",
-    "don't tell", "do not tell", "keep this quiet", "not to be shared", "off books",
-    "eyes only",
+    "confidential", "never repeat", "do not repeat", "don't repeat", "do not share",
+    "don't share", "not for sharing", "do not put in", "do not surface", "never surface",
+    "off the record", "keep this between", "keep it confidential", "in confidence",
+    "private", "sensitive", "secret", "internal only", "nda", "under embargo",
+    "unannounced", "between us", "stays between", "don't tell", "do not tell",
+    "keep this quiet", "not to be shared", "off books", "eyes only",
 )  # fmt: skip
 
-# Tokens that mark a block wherever they sit in a sentence. Bare "private" and
-# "sensitive" are excluded because they occur in ordinary prose ("private repo",
-# "sensitive data"), so they count only in prefix position.
-ANYWHERE_MARKERS = (
-    *(t for t in PREFIX_MARKERS if t not in {"private", "sensitive"}),
-    "told me privately",
-    "told us privately",
+# Markers that count only in prefix position, because ordinary prose uses them ("private
+# repo", "sensitive data", "rotated the client secret").
+PREFIX_ONLY_MARKERS = frozenset({"private", "sensitive", "secret"})
+
+# Inflections a marker token also matches. "Omar told Dana confidentially that" and "under
+# confidentiality" mark a block exactly as "confidential" does.
+MARKER_INFLECTIONS = {"confidential": "(?:ly|ity)?"}
+
+# Tokens that mark a block wherever they sit in a sentence.
+ANYWHERE_MARKERS = tuple(t for t in PREFIX_MARKERS if t not in PREFIX_ONLY_MARKERS)
+
+# "told me privately", "told Dana privately", "said privately". The words between the
+# verb and the adverb are usually a name, so a hit is reported by this label alone.
+PRIVATELY = re.compile(r"(?<![a-z0-9'])(?:told|said)(?:\s+[a-z][\w'-]*){0,3}?\s+privately\b")
+PRIVATELY_LABEL = "told or said ... privately"
+
+# Hyphens and dashes read as spaces for marker matching, so "Off-the-record" and
+# "internal\u2011only" meet "off the record" and "internal only".
+DASHES = re.compile("[-\u2010-\u2015\u2212\ufe58\ufe63\uff0d]")
+
+# Labelled secret assignments. `=` is code or env syntax and any value counts. After `:`
+# the value counts when it carries a digit or a symbol, or stands alone at the end of the
+# line, so a prose label such as "Password: reset by IT on Friday" is not a credential.
+_SECRET_LABEL = (
+    r"(?:\b|(?<=_))"
+    r"(?:password|passwd|pwd|passcode|secret(?:[_-]?key)?|api[_-]?key|client[_-]?secret)\b"
+)
+_SECRET_VALUE = (
+    r"""(?:[*_"'`]*\s*=\s*["'`]?[^\s"'`]{4,}"""
+    r"""|[*_"'`]*\s*:[*_\s]*["'`]?"""
+    r"""(?:(?=[^\s"'`]{6,})[^\s"'`]*[0-9!@#$%^&*+=~?<>{}\[\];|\\][^\s"'`]*"""
+    r"""|[^\s"'`]{4,}["'`]?\s*$))"""
 )
 
 # Shapes the fail-closed rule withholds under `security` with no further analysis. The
@@ -140,15 +184,41 @@ ANYWHERE_MARKERS = (
 CREDENTIAL_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("slack token", re.compile(r"\bxox[abcdeprs]-[A-Za-z0-9-]{8,}")),
     ("slack app token", re.compile(r"\bxapp-[A-Za-z0-9-]{8,}")),
+    (
+        "slack webhook",
+        re.compile(r"\bhooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9/_-]{16,}"),
+    ),
     ("github token", re.compile(r"\bgh[opsur]_[A-Za-z0-9]{20,}")),
     ("github fine-grained token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}")),
     ("gitlab token", re.compile(r"\bglpat-[A-Za-z0-9_-]{16,}")),
     ("openai or anthropic key", re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{16,}")),
-    ("aws access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("stripe key", re.compile(r"\b[rsp]k_(?:live|test)_[A-Za-z0-9]{10,}")),
+    ("npm token", re.compile(r"\bnpm_[A-Za-z0-9]{30,}")),
+    ("pypi token", re.compile(r"\bpypi-[A-Za-z0-9_-]{32,}")),
+    ("aws access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    (
+        "aws secret access key",
+        re.compile(
+            r"\baws_?secret_?(?:access_?)?key\b[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9/+=]{20,}",
+            re.IGNORECASE,
+        ),
+    ),
     ("google api key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}")),
     ("private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("bearer token", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*")),
+    (
+        "basic auth header",
+        re.compile(r"\bauthorization:\s*basic\s+[A-Za-z0-9+/]{8,}=*", re.IGNORECASE),
+    ),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
+    (
+        "url with embedded password",
+        re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@", re.IGNORECASE),
+    ),
+    (
+        "password or secret assignment",
+        re.compile(_SECRET_LABEL + _SECRET_VALUE, re.IGNORECASE | re.MULTILINE),
+    ),
     (
         "oauth token or credentials file path",
         re.compile(r"[\w~./-]*(?:token|credential)s?\.json\b", re.IGNORECASE),
@@ -176,8 +246,9 @@ CREDENTIAL_SHAPED = re.compile(
 
 # The redacted file carries its own provenance header naming the source log. That header is
 # not withheld material, so comparing a slug against it makes every archive fail on its own
-# filename. Strip it before building the token set the identifier checks use.
-PROVENANCE = re.compile(r"^\s*#{1,6}\s*withheld from .*$", re.IGNORECASE | re.MULTILINE)
+# filename. Strip it before building the token set the identifier checks use. The pattern
+# stays on one line so line numbers in the stripped text still match the file.
+PROVENANCE = re.compile(r"^[ \t]*#{1,6}[ \t]*withheld from .*$", re.IGNORECASE | re.MULTILINE)
 
 # Slugs and paths are hyphen-joined identifiers. Tokenizing them as prose yields one long
 # token that matches nothing, which is how a filename naming the redacted subject slipped
@@ -286,17 +357,48 @@ def sentences(text: str) -> list[str]:
     return out
 
 
+def sentence_spans(text: str) -> list[tuple[int, str]]:
+    """Every raw sentence of the text with the file line it starts on, so a failure can
+    point at the sentence without reprinting it."""
+    out = []
+    pos = 0
+    for match in [*SENTENCE_SPLIT.finditer(text), None]:
+        end = match.start() if match else len(text)
+        chunk = text[pos:end]
+        lead = len(chunk) - len(chunk.lstrip())
+        out.append((text.count("\n", 0, pos + lead) + 1, chunk))
+        pos = match.end() if match else end
+    return out
+
+
 class WordStream:
-    """A token sequence that answers whether a run of words occurs in it, independent of
-    the punctuation, emphasis and line breaks around the words."""
+    """A token sequence that answers whether a run of words occurs in it, and on which
+    line, independent of the punctuation, emphasis and line breaks around the words.
+    Tokenising line by line yields the same sequence as the whole text, because no token
+    crosses a newline."""
 
     def __init__(self, text: str, shingle: int) -> None:
-        self.tokens = words(text)
+        self.tokens: list[str] = []
+        self.lines: list[int] = []
+        for line_no, line in enumerate(text.split("\n"), start=1):
+            found = words(line)
+            self.tokens += found
+            self.lines += [line_no] * len(found)
         self.joined = " " + " ".join(self.tokens) + " "
         self.shingles = shingles(self.tokens, shingle)
 
+    def find_run(self, tokens: list[str] | tuple[str, ...]) -> int | None:
+        """The line the run starts on, or None when the run does not occur."""
+        if not tokens:
+            return None
+        at = self.joined.find(" " + " ".join(tokens) + " ")
+        if at < 0:
+            return None
+        # Token i starts after the (i+1)th space, so the spaces before the match count it.
+        return self.lines[self.joined.count(" ", 0, at)]
+
     def contains_run(self, tokens: list[str]) -> bool:
-        return bool(tokens) and (" " + " ".join(tokens) + " ") in self.joined
+        return self.find_run(tokens) is not None
 
 
 def strip_hidden(text: str) -> str:
@@ -438,12 +540,20 @@ def strip_notices(body: str) -> str:
 
 
 def marker_regex(tokens: tuple[str, ...]) -> re.Pattern[str]:
-    alternatives = [r"\s+".join(re.escape(w) for w in t.split()) for t in tokens]
+    alternatives = [
+        r"\s+".join(re.escape(w) for w in t.split()) + MARKER_INFLECTIONS.get(t, "")
+        for t in tokens
+    ]
     return re.compile(r"(?<![a-z0-9'])(?:" + "|".join(alternatives) + r")(?![a-z0-9])")
 
 
 PREFIX_MARKER_RE = marker_regex(PREFIX_MARKERS)
 ANYWHERE_MARKER_RE = marker_regex(ANYWHERE_MARKERS)
+
+
+def marker_text(text: str) -> str:
+    """Text as the marker rule reads it: normalised, with hyphens and dashes as spaces."""
+    return re.sub(r"\s+", " ", DASHES.sub(" ", normalize(text))).strip()
 
 
 def mask(text: str, generic: bool = True) -> str:
@@ -455,16 +565,49 @@ def mask(text: str, generic: bool = True) -> str:
     return CREDENTIAL_SHAPED.sub("<value>", text) if generic else text
 
 
-def show_token(token: str) -> str:
-    """A token as it may appear in a report. Digit runs and credential-shaped values are
-    described by length only, because the digits are the secret."""
-    if token.isdigit() or CREDENTIAL_SHAPED.fullmatch(token) or mask(token) != token:
-        return f"<{len(token)}-char value>"
-    return token
+def distinctive(text: str, allowed: frozenset[str]) -> set[str]:
+    """Identifier tokens of a text: everything but stopwords, allowed tokens, single
+    letters and digit runs shorter than MIN_DIGIT_TOKEN. Slugs and paths split on their
+    separators, so a hyphen-joined filename yields its words."""
+    out = set()
+    for t in IDENT_SPLIT.split(normalize(text)):
+        if not t or t in STOPWORDS or t in allowed:
+            continue
+        if t.isdigit():
+            if len(t) >= MIN_DIGIT_TOKEN:
+                out.add(t)
+        elif len(t) >= 2:
+            out.add(t)
+    return out
 
 
-def preview(text: str) -> str:
-    return mask(" ".join(WORD.findall(normalize(text))))[:PREVIEW_CHARS]
+def entity_candidates(text: str, allowed: frozenset[str]) -> set[str]:
+    """Tokens that look like a named subject: proper nouns, caseless-script words and
+    credential-shaped values.
+
+    Used for the concatenated-slug check, where a substring match on ordinary words would
+    flag every archive. Capitalisation identifies a redaction subject in the withheld
+    prose: it is a proper noun there, and ordinary vocabulary is not. Tokens with no case
+    system, which covers every non-Latin script without case, always qualify, because
+    case cannot be used to rule them out. Candidates are normalised the same way the slug
+    is, so a diacritic or a Cyrillic letter in the prose still meets its plain spelling in
+    the filename.
+    """
+    out = set()
+    cased = unicodedata.normalize("NFC", PROVENANCE.sub(" ", text).translate(INVISIBLE))
+    for raw in WORD.findall(cased):
+        low = normalize(raw)
+        if not low or low in STOPWORDS or low in allowed:
+            continue
+        caseless = raw.lower() == raw.upper()
+        looks_named = raw[:1].isupper() or caseless or CREDENTIAL_SHAPED.fullmatch(raw)
+        if looks_named and (len(low) >= 2 or caseless):
+            out.add(low)
+    for m in CREDENTIAL_SHAPED.finditer(text):
+        v = normalize(m.group(0))
+        if v and v not in allowed:
+            out.add(v)
+    return out
 
 
 @dataclass
@@ -477,7 +620,7 @@ class Archive:
     body: str
     redacted_path: Path | None
     withheld_raw: str
-    source_path: Path | None
+    source_path: Path
     source_raw: str
     shingle: int
     allowed: frozenset[str]
@@ -514,6 +657,34 @@ class Archive:
     def withheld_body(self) -> str:
         return PROVENANCE.sub(" ", self.withheld_raw)
 
+    @cached_property
+    def own_date(self) -> set[str]:
+        """The note's own date is public by construction: it is in the filename and the
+        path. Without this, a withheld sentence mentioning any day of the same year fails
+        every archive on the year alone, and a gate that fails ordinary archives gets
+        bypassed."""
+        return set(IDENT_SPLIT.split(self.date or "")) - {""}
+
+    @cached_property
+    def withheld_idents(self) -> set[str]:
+        return distinctive(self.withheld_body, self.allowed) - self.own_date
+
+    @cached_property
+    def withheld_entities(self) -> set[str]:
+        return entity_candidates(self.withheld_body, self.allowed) - self.own_date
+
+    def hide(self, text: str) -> str:
+        """Text as a failure message may print it: credential shapes masked, and every
+        token from the withheld text replaced by a placeholder. A report that names the
+        person a block was withheld about is a second copy of the secret."""
+        hidden = self.withheld_idents | self.withheld_entities
+
+        def replace(match: re.Match[str]) -> str:
+            token = normalize(match.group(0))
+            return WITHHELD_PLACEHOLDER if token in hidden - PATH_WORDS else match.group(0)
+
+        return re.sub(r"[^\W_]+", replace, mask(text, generic=False).translate(INVISIBLE))
+
 
 # Each check appends to archive.failures and returns nothing.
 
@@ -527,7 +698,7 @@ def check_structure(a: Archive) -> None:
         return
     stem = a.note_path.stem
     if not stem.startswith(date):
-        a.fail(f"archived note slug {stem!r} does not start with date {date}")
+        a.fail(f"archived note slug {a.hide(stem)!r} does not start with date {date}")
 
     year, month = date[:4], date[5:7]
     resolved = a.note_path.resolve()
@@ -555,39 +726,33 @@ def check_structure(a: Archive) -> None:
         name = Path(value).name
         stems.append(Path(name).stem)
         if not value.startswith("sessions/") or not name.endswith(".md"):
-            a.fail(f"`source: {value}` is not a `sessions/<name>.md` path")
+            a.fail(f"`source: {a.hide(value)}` is not a `sessions/<name>.md` path")
         if not name.startswith(date):
-            a.fail(f"`source: {value}` does not carry the note's date {date}")
+            a.fail(f"`source: {a.hide(value)}` does not carry the note's date {date}")
     if sources and not any(
         stem == s or (DATE.fullmatch(s) and stem.startswith(s)) for s in stems
     ):
         a.fail(
-            f"archived note slug {stem!r} matches none of its source filenames {stems}. "
+            f"archived note slug {a.hide(stem)!r} matches none of its source filenames "
+            f"{[a.hide(s) for s in stems]}. "
             "The slug is the sanctum filename, or the date plus a derived topic for a bare "
             "day log; a re-slugged note sets `source_withheld: true` instead."
         )
 
+    source_name = a.hide(a.source_path.name)
     if a.redacted_path is not None:
+        redacted_name = a.hide(a.redacted_path.name)
         if not a.redacted_path.stem.startswith(date):
-            a.fail(
-                f"redacted file {a.redacted_path.name!r} does not carry the note's date {date}"
-            )
+            a.fail(f"redacted file {redacted_name!r} does not carry the note's date {date}")
         if sources and a.redacted_path.name not in names:
             a.fail(
-                f"redacted file {a.redacted_path.name!r} is not named after any `source` "
+                f"redacted file {redacted_name!r} is not named after any `source` "
                 "filename; it must be sessions/redacted/<original-filename>.md"
             )
-    if a.source_path is not None:
-        if sources and a.source_path.name not in names:
-            a.fail(
-                f"--source {a.source_path.name!r} is not listed under `source` in the "
-                "frontmatter"
-            )
-        if a.redacted_path is not None and a.redacted_path.name != a.source_path.name:
-            a.fail(
-                f"redacted file {a.redacted_path.name!r} is not named after --source "
-                f"{a.source_path.name!r}"
-            )
+        if a.redacted_path.name != a.source_path.name:
+            a.fail(f"redacted file {redacted_name!r} is not named after --source {source_name!r}")
+    if sources and a.source_path.name not in names:
+        a.fail(f"--source {source_name!r} is not listed under `source` in the frontmatter")
 
 
 def check_clean_claim(a: Archive) -> None:
@@ -641,7 +806,8 @@ def check_notices(a: Archive) -> None:
         bad = [c for c in cats if c not in CATEGORIES]
         if bad:
             a.fail(
-                f"notice at body line {line_no} names {bad}, which is outside the category "
+                f"notice at body line {line_no} names {[a.hide(c) for c in bad]}, which is "
+                "outside the category "
                 f"vocabulary {sorted(CATEGORIES)}"
             )
         rest = text[match.end() :]
@@ -654,8 +820,8 @@ def check_notices(a: Archive) -> None:
             for path in SESSIONS_PATH.findall(rest):
                 if path.rstrip(".") != expected_path:
                     a.fail(
-                        f"notice at body line {line_no} points at {path!r}; the withheld "
-                        f"text is at {expected_path}"
+                        f"notice at body line {line_no} points at {a.hide(path)!r}; "
+                        f"the withheld text is at {a.hide(expected_path)}"
                     )
     if declared is not None and total != declared:
         a.fail(
@@ -664,28 +830,59 @@ def check_notices(a: Archive) -> None:
         )
 
 
+def searchable_lines(a: Archive) -> list[tuple[int, str]]:
+    """The note as (file line, text) pairs for the prose token sweep.
+
+    Frontmatter is included except provenance keys and structural keys whose value has
+    exactly its expected shape, so `type: session-log`, a shared `date:` and the sanctum
+    filename do not read as leaks. Provenance and the filename copies in the body are
+    checked separately, because the fix for them is a re-slug. Line numbers are file
+    lines: line 1 is the opening `---`.
+    """
+    out: list[tuple[int, str]] = []
+    line_no = 2
+    for key, values, raw in frontmatter_entries(a.fm_lines):
+        lowered = (key or "").lower()
+        shape = STRUCTURAL_SHAPES.get(lowered)
+        exempt = lowered in PROVENANCE_KEYS or (
+            shape is not None and len(values) == 1 and shape.fullmatch(values[0]) is not None
+        )
+        if not exempt:
+            out += [(line_no + i, line) for i, line in enumerate(raw)]
+        line_no += len(raw)
+    body_start = len(a.fm_lines) + 3
+    for i, line in enumerate(a.body.split("\n")):
+        out.append((body_start + i, ARCHIVED_FROM.sub(" ", SESSIONS_PATH.sub(" ", line))))
+    return out
+
+
 def check_withheld_text(a: Archive) -> None:
-    allowed = a.allowed
     note = WordStream(a.note_raw, a.shingle)
 
     # 1. No withheld sentence survives anywhere in the archived note, whatever the
     #    punctuation, emphasis or line breaks around it, and with or without its label.
     seen: set[str] = set()
-    for sentence in sentences(a.withheld_raw):
+    for sentence in sentences(a.withheld_body):
         tokens = WORD.findall(sentence)
         key = " ".join(tokens)
-        if key not in seen and note.contains_run(tokens):
+        line = None if key in seen else note.find_run(tokens)
+        if line is not None:
             seen.add(key)
-            a.fail(f"withheld sentence present in archived note: {preview(sentence)!r}")
+            a.fail(f"withheld sentence present in archived note at line {line} (text not printed)")
 
     # 2. No long word-run from the withheld text survives, which catches paraphrase that
-    #    kept the load-bearing clause.
-    for shingle in sorted(shingles(words(a.withheld_raw), a.shingle)):
-        if shingle in note.shingles:
-            a.fail(
-                f"withheld {a.shingle}-word run present in archived note: "
-                f"{mask(' '.join(shingle))!r}"
-            )
+    #    kept the load-bearing clause. One report per note line, because a leaked sentence
+    #    carries many overlapping runs.
+    run_lines = {
+        note.find_run(shingle)
+        for shingle in shingles(words(a.withheld_body), a.shingle)
+        if shingle in note.shingles
+    }
+    for line in sorted(n for n in run_lines if n is not None):
+        a.fail(
+            f"withheld {a.shingle}-word run present in archived note at line {line} "
+            "(text not printed)"
+        )
 
     # 3. Token sweep over the WHOLE archived note.
     #
@@ -696,64 +893,14 @@ def check_withheld_text(a: Archive) -> None:
     # capability's own documentation calls the subtlest it can produce. And a
     # credential-shaped value like `PIN: 1234` is neither long prose nor seven words,
     # so length was never the right axis for it.
-    withheld_body = a.withheld_body
-
-    def distinctive(text: str) -> set[str]:
-        out = set()
-        for t in IDENT_SPLIT.split(normalize(text)):
-            if not t or t in STOPWORDS or t in allowed:
-                continue
-            if t.isdigit():
-                if len(t) >= MIN_DIGIT_TOKEN:
-                    out.add(t)
-            elif len(t) >= 2:
-                out.add(t)
-        return out
-
-    def entity_candidates(text: str) -> set[str]:
-        """Tokens that look like a named subject rather than ordinary vocabulary.
-
-        Used only for the filename and provenance checks. A review made a clean
-        `2026-05-04-team-update.md` fail because withheld prose contained the word
-        "team", while `amy-departure` passed because "amy" was under a length floor.
-        Length was the wrong discriminator in both directions.
-
-        Capitalisation is the better one for a slug check: a redaction subject is a
-        proper noun in the withheld prose, and ordinary vocabulary is not. Tokens with
-        no case system, which covers every non-Latin script without case, always
-        qualify, because case cannot be used to rule them out. Candidates are
-        normalised the same way the slug is, so a diacritic or a Cyrillic letter in
-        the prose still meets its plain spelling in the filename.
-        """
-        out = set()
-        cased = unicodedata.normalize("NFC", PROVENANCE.sub(" ", text).translate(INVISIBLE))
-        for raw in WORD.findall(cased):
-            low = normalize(raw)
-            if not low or low in STOPWORDS or low in allowed:
-                continue
-            caseless = raw.lower() == raw.upper()
-            looks_named = raw[:1].isupper() or caseless or CREDENTIAL_SHAPED.fullmatch(raw)
-            if looks_named and (len(low) >= 2 or caseless):
-                out.add(low)
-        for m in CREDENTIAL_SHAPED.finditer(text):
-            v = normalize(m.group(0))
-            if v and v not in allowed:
-                out.add(v)
-        return out
-
-    # The note's own date is public by construction: it is in the filename and the path.
-    # Without this, a withheld sentence mentioning any day of the same year fails every
-    # archive on the year alone, and a gate that fails ordinary archives gets bypassed.
-    own_date = set(IDENT_SPLIT.split(a.date or "")) - {""}
-    withheld_idents = distinctive(withheld_body) - own_date
-    withheld_entities = entity_candidates(withheld_body) - own_date
+    allowed, own_date = a.allowed, a.own_date
 
     # Credential-shaped values are compared verbatim with no threshold of any kind, and
     # reported by line number only.
     note_lines = a.note_raw.split("\n")
     note_norm = normalize(a.note_raw)
     reported: set[str] = set()
-    for m in CREDENTIAL_SHAPED.finditer(withheld_body):
+    for m in CREDENTIAL_SHAPED.finditer(a.withheld_body):
         # Trailing punctuation belongs to the sentence, and `PIN: 1234.` must still
         # match `PIN: 1234`.
         needle = normalize(m.group(0)).rstrip(".,;:!?'\"")
@@ -771,50 +918,42 @@ def check_withheld_text(a: Archive) -> None:
                 f"archived note at {where} (value not printed)"
             )
 
-    # Structural and provenance frontmatter is excluded so `type: session-log`, a shared
-    # `date:` and the sanctum filename do not read as leaks. Provenance is checked below
-    # against entity candidates, which is the right test for a filename.
-    content_fm = "\n".join(
-        line
-        for key, _, raw in frontmatter_entries(a.fm_lines)
-        if key is None or key.lower() not in STRUCTURAL_KEYS | PROVENANCE_KEYS
-        for line in raw
-    )
-    body_prose = ARCHIVED_FROM.sub(" ", SESSIONS_PATH.sub(" ", a.body))
-    searchable = f"{content_fm}\n{body_prose}"
-
-    leaked_tokens = sorted(distinctive(searchable) & withheld_idents)
-    if leaked_tokens:
+    # Each leaked token is reported once, at the first line carrying it, by length only.
+    by_line: dict[int, list[str]] = {}
+    seen_tokens: set[str] = set()
+    for line_no, line in searchable_lines(a):
+        for token in sorted(distinctive(line, allowed) & a.withheld_idents - seen_tokens):
+            seen_tokens.add(token)
+            by_line.setdefault(line_no, []).append(f"<{len(token)}-char token>")
+    if by_line:
+        where = "; ".join(f"line {n}: {', '.join(found)}" for n, found in by_line.items())
         a.fail(
-            "tokens from the withheld text appear in the archived note: "
-            f"{[show_token(t) for t in leaked_tokens]}. Remove them, or pass --allow for "
-            "each that is genuinely unrelated to what was withheld."
+            f"tokens from the withheld text appear in the archived note at {where}; the "
+            "tokens are not printed. Remove them, or pass --allow for each that is "
+            "genuinely unrelated to what was withheld."
         )
 
     # The filename and provenance are copies of the sanctum filename rather than
-    # authored prose, so they compare against entity candidates and the fix differs:
-    # a re-slug, not an edit.
-    # Capitalisation identifies an entity in the withheld PROSE. A slug is lowercase by
-    # construction, so the same test on that side rules out every real hit; the slug is
-    # tokenised plainly and intersected with the entities found in the prose.
+    # authored prose, so they are checked on their own and the fix differs: a re-slug,
+    # not an edit. A slug is lowercase by construction, so it is intersected with every
+    # withheld identifier. A review carried "lease" and "layoffs" through a slug, a
+    # `source:` value and a notice path when this compared against capitalised entities
+    # only. Stopwords keep ordinary words such as "team" from failing a clean slug.
     slug = a.note_path.stem
-    slug_hits = sorted(distinctive(slug) & withheld_entities)
+    slug_hits = distinctive(slug, allowed) & a.withheld_idents
 
     # A slug can name a subject without tokenising to it. `personc-leaving` splits to
     # "personc", which matches neither "person" nor "c", so a review carried a subject
     # through by concatenation. Compare the separator-stripped slug against each
-    # withheld entity as a substring too. Four characters is the floor because shorter
-    # entities collide with ordinary syllables.
+    # withheld entity as a substring too. Entities only, because a substring test on
+    # ordinary words matches syllables everywhere; four characters is the floor because
+    # shorter entities collide with ordinary syllables.
     slug_joined = "".join(IDENT_SPLIT.split(normalize(slug)))
-    slug_hits += [
-        e for e in sorted(withheld_entities)
-        if len(e) >= 4 and e in slug_joined and e not in slug_hits
-    ]
+    slug_hits |= {e for e in a.withheld_entities if len(e) >= 4 and e in slug_joined}
     if slug_hits:
         a.fail(
-            f"archived note filename names a withheld subject: "
-            f"{[show_token(t) for t in slug_hits]}. Re-slug from redacted content and "
-            "set source_withheld: true."
+            f"archived note filename names a withheld subject ({len(slug_hits)} token(s), "
+            "not printed). Re-slug from redacted content and set source_withheld: true."
         )
 
     # Provenance is read from parsed YAML rather than by line prefix. A review carried a
@@ -834,39 +973,54 @@ def check_withheld_text(a: Archive) -> None:
         for h in ARCHIVED_FROM.findall(a.body)
     ]
     for label, value, fix in copies:
-        hits = sorted(distinctive(value) & withheld_entities - {"sessions", "redacted"})
-        if hits:
-            a.fail(
-                f"{label} names a withheld subject: {[show_token(t) for t in hits]} in "
-                f"{mask(value, generic=False)!r}. {fix}"
-            )
+        if distinctive(value, allowed) & a.withheld_idents - PATH_WORDS:
+            a.fail(f"{label} names a withheld subject in {a.hide(value)!r}. {fix}")
 
 
 def check_markers(a: Archive) -> None:
-    """The note itself must carry no confidentiality marker. A marked block is withheld
-    whole, marker line included, so any marker that survives means the gate missed a
-    block, whatever the redacted file says. Markers inside comments and code still
-    count: they are in the file that syncs, rendered or not."""
-    text = strip_notices(a.body)
-    # Body line 1 is the line after the closing `---`, so report file line numbers.
-    offset = len(a.fm_lines) + 3
-    for line_no, line in enumerate(text.split("\n"), start=offset):
-        label = normalize(split_label(line)[0])
+    """The note itself must carry no confidentiality marker, in the body or in a
+    frontmatter value. A marked block is withheld whole, marker line included, so any
+    marker that survives means the gate missed a block, whatever the redacted file says.
+    Markers inside comments and code still count: they are in the file that syncs,
+    rendered or not. A review put "Confidential, do not share: ..." in a `summary:` value
+    while this read the body only."""
+    # (file line, text) pairs. Line 1 is the opening `---`.
+    fm_values: list[tuple[int, str]] = []
+    line_no = 2
+    for key, values, raw in frontmatter_entries(a.fm_lines):
+        fm_values += [(line_no, v) for v in values] if key is not None else [(line_no, raw[0])]
+        line_no += len(raw)
+    body_start = len(a.fm_lines) + 3
+    body_lines = strip_notices(a.body).split("\n")
+    body = [(body_start + i, line) for i, line in enumerate(body_lines)]
+
+    for line_no, text in fm_values + body:
+        label = marker_text(split_label(text)[0])
         hit = PREFIX_MARKER_RE.search(label) if label else None
         if hit:
             a.fail(
                 f"confidentiality marker {hit.group(0)!r} in the prefix of line {line_no}; "
                 "the whole block must be withheld"
             )
+
+    # The anywhere sweep reads the frontmatter values and the body each as running text,
+    # so a phrase split across lines still matches.
     reported = set()
-    for hit in ANYWHERE_MARKER_RE.finditer(normalize(text)):
-        phrase = re.sub(r"\s+", " ", hit.group(0))
-        if phrase not in reported:
-            reported.add(phrase)
-            a.fail(
-                f"confidentiality marker {phrase!r} in the archived note body; the whole "
-                "block must be withheld"
-            )
+    for where, part in (
+        ("frontmatter", " ".join(text for _, text in fm_values)),
+        ("body", "\n".join(body_lines)),
+    ):
+        folded = marker_text(part)
+        phrases = [re.sub(r"\s+", " ", hit.group(0)) for hit in ANYWHERE_MARKER_RE.finditer(folded)]
+        if PRIVATELY.search(folded):
+            phrases.append(PRIVATELY_LABEL)
+        for phrase in phrases:
+            if (where, phrase) not in reported:
+                reported.add((where, phrase))
+                a.fail(
+                    f"confidentiality marker {phrase!r} in the archived note {where}; the "
+                    "whole block must be withheld"
+                )
 
 
 def check_credentials(a: Archive) -> None:
@@ -885,7 +1039,8 @@ def check_source(a: Archive) -> None:
     """Every sentence of the source log must survive in the archived note or in the
     redacted file. A sentence in neither was lost, and after the prune it is gone.
     Every redacted sentence must also occur in the source, or the withheld copy is not
-    the verbatim record step 5 of the sequence promises."""
+    the verbatim record step 5 of the sequence promises. A lost sentence is presumptively
+    material that should have been withheld, so it is reported by line only."""
     note = WordStream(a.note_raw, a.shingle)
     withheld = WordStream(a.withheld_raw, a.shingle)
     source = WordStream(a.source_raw, a.shingle)
@@ -895,7 +1050,7 @@ def check_source(a: Archive) -> None:
         return not tokens or note.contains_run(tokens) or withheld.contains_run(tokens)
 
     lost = []
-    for sentence in SENTENCE_SPLIT.split(a.source_raw):
+    for line_no, sentence in sentence_spans(a.source_raw):
         if survives(sentence):
             continue
         # A referring sentence withheld from a labelled paragraph leaves the label in the
@@ -903,20 +1058,25 @@ def check_source(a: Archive) -> None:
         label, remainder = split_label(sentence)
         if label and survives(label) and survives(remainder):
             continue
-        lost.append(preview(sentence))
-    for item in lost[:10]:
-        a.fail(f"source sentence is in neither the archived note nor the redacted file: {item!r}")
-    if len(lost) > 10:
-        a.fail(f"...and {len(lost) - 10} more source sentence(s) missing from both")
+        lost.append(line_no)
+    for line_no in lost[:MAX_LOST_LISTED]:
+        a.fail(
+            f"source sentence at line {line_no} of --source is in neither the archived note "
+            "nor the redacted file (text not printed)"
+        )
+    if len(lost) > MAX_LOST_LISTED:
+        a.fail(
+            f"...and {len(lost) - MAX_LOST_LISTED} more source sentence(s) missing from both"
+        )
 
     if a.redacted_path is None:
         return
-    for sentence in SENTENCE_SPLIT.split(a.withheld_body):
+    for line_no, sentence in sentence_spans(a.withheld_body):
         tokens = words(sentence)
         if tokens and not source.contains_run(tokens):
             a.fail(
-                "redacted file sentence does not occur in the source log, so the withheld "
-                f"copy is not verbatim: {preview(sentence)!r}"
+                f"redacted file sentence at line {line_no} does not occur in the source log, "
+                "so the withheld copy is not verbatim (text not printed)"
             )
 
 
@@ -929,8 +1089,7 @@ def run(a: Archive, no_withheld: bool) -> list[str]:
         check_withheld_text(a)
     check_markers(a)
     check_credentials(a)
-    if a.source_path is not None:
-        check_source(a)
+    check_source(a)
     return a.failures
 
 
@@ -954,15 +1113,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source",
         type=Path,
-        help="the sessions/ log about to be pruned; every sentence in it must survive in "
-        "the archived note or the redacted file",
+        help="required: the sessions/ log about to be pruned; every sentence in it must "
+        "survive in the archived note or the redacted file",
     )
     parser.add_argument(
         "--shingle",
         type=int,
         default=SHINGLE_WORDS,
         help=f"consecutive-word run treated as a leak (default {SHINGLE_WORDS}, "
-        f"range 3 to {MAX_SHINGLE_WORDS})",
+        f"range {MIN_SHINGLE_WORDS} to {MAX_SHINGLE_WORDS})",
     )
     parser.add_argument(
         "--allow", action="append", default=[], metavar="TOKEN",
@@ -980,8 +1139,20 @@ def cannot_run(message: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    if not 3 <= args.shingle <= MAX_SHINGLE_WORDS:
-        return cannot_run(f"--shingle must be between 3 and {MAX_SHINGLE_WORDS}")
+    if not MIN_SHINGLE_WORDS <= args.shingle <= MAX_SHINGLE_WORDS:
+        return cannot_run(
+            f"--shingle must be between {MIN_SHINGLE_WORDS} and {MAX_SHINGLE_WORDS}"
+        )
+
+    # Without the source log nothing can tell a withheld block that reached neither file
+    # from one that was never there, and the prune that follows destroys it. A review
+    # passed a note that silently dropped a marked block as "verified clean".
+    if args.source is None:
+        return cannot_run(
+            "--source is required. Name the sessions/ log about to be pruned, so a block "
+            "that reached neither the archived note nor the redacted file is caught "
+            "before the prune destroys it."
+        )
 
     note_raw = read(args.archived_note, "archived note")
     if not note_raw.strip():
@@ -989,10 +1160,10 @@ def main(argv: list[str] | None = None) -> int:
 
     withheld_raw = ""
     if args.no_withheld:
-        if args.redacted_file is not None and args.redacted_file.exists():
+        if args.redacted_file is not None:
             return cannot_run(
-                f"--no-withheld passed but {args.redacted_file} exists. "
-                "Either material was withheld or it was not."
+                f"--no-withheld passed together with the redacted file {args.redacted_file}. "
+                "Either material was withheld or it was not; pass one of the two."
             )
         redacted_path = None
     else:
@@ -1015,11 +1186,9 @@ def main(argv: list[str] | None = None) -> int:
                 "withheld material lives"
             )
 
-    source_raw = ""
-    if args.source is not None:
-        source_raw = read(args.source, "source log")
-        if not source_raw.strip():
-            return cannot_run(f"source log {args.source} is empty")
+    source_raw = read(args.source, "source log")
+    if not source_raw.strip():
+        return cannot_run(f"source log {args.source} is empty")
 
     try:
         root = _sanctum.archive_root()
@@ -1027,18 +1196,10 @@ def main(argv: list[str] | None = None) -> int:
         return cannot_run(str(exc))
 
     fm_lines, body = split_frontmatter(note_raw)
-    if fm_lines is None:
-        sys.stderr.write(
-            f"FAIL: {args.archived_note} has no closed frontmatter block, so date, source "
-            "and redaction flags cannot be checked\n\nRoll back the archive. Do not prune "
-            "the source log from sessions/.\n"
-        )
-        return 1
-
     archive = Archive(
         note_path=args.archived_note,
         note_raw=note_raw,
-        fm_lines=fm_lines,
+        fm_lines=fm_lines or [],
         body=body,
         redacted_path=redacted_path,
         withheld_raw=withheld_raw,
@@ -1048,10 +1209,21 @@ def main(argv: list[str] | None = None) -> int:
         allowed=frozenset(normalize(t) for t in args.allow),
         archive_root=root,
     )
+    # The note's path carries its slug, so it is printed through the same mask as every
+    # failure message.
+    shown = archive.hide(str(args.archived_note))
+    if fm_lines is None:
+        sys.stderr.write(
+            f"FAIL: {shown} has no closed frontmatter block, so date, source and redaction "
+            "flags cannot be checked\n\nRoll back the archive. Do not prune the source log "
+            "from sessions/.\n"
+        )
+        return 1
+
     failures = run(archive, args.no_withheld)
 
     if failures:
-        sys.stderr.write(f"FAIL: {len(failures)} redaction problem(s) in {args.archived_note}\n")
+        sys.stderr.write(f"FAIL: {len(failures)} redaction problem(s) in {shown}\n")
         for failure in failures:
             sys.stderr.write(f"  - {failure}\n")
         sys.stderr.write("\nRoll back the archive. Do not prune the source log from sessions/.\n")
@@ -1069,8 +1241,6 @@ def main(argv: list[str] | None = None) -> int:
         source_line = (
             f"\n    every sentence of {args.source.name} survives in the note or the "
             "redacted file"
-            if args.source is not None
-            else ""
         )
         print(f"OK  {args.archived_note}\n{detail}{source_line}")
     return 0
