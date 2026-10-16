@@ -197,24 +197,6 @@ STRUCTURED_TAIL = re.compile(r"[ \t]*(?:[,}\]].*)?")
 # Markdown emphasis around a whole value: `_none_`, `**null**`.
 EMPHASIS_VALUE = re.compile(r"(?P<d>\*\*|__|\*|_)(?P<v>[^*_].*?)(?P=d)")
 
-# The one prose shape that describes a credential without holding it: a past participle
-# of an operational verb, then a preposition, then the rest of the sentence.
-# "Password: reset by IT on Friday", "Password: stored in the team vault".
-CREDENTIAL_STATUS_VERBS = (
-    "reset", "rotated", "changed", "updated", "revoked", "expired", "removed", "stored",
-    "saved", "kept", "moved", "issued", "regenerated",
-)  # fmt: skip
-# "to", "with" and "from" are left out: "changed to X", "reset with X" and "rotated from X"
-# carry a credential value.
-CREDENTIAL_STATUS_PREPOSITIONS = (
-    "by", "on", "in", "at", "via", "after", "before", "during", "for", "since", "until",
-)  # fmt: skip
-STATUS_SENTENCE = re.compile(
-    r"(?:" + "|".join(CREDENTIAL_STATUS_VERBS) + r") +(?:"
-    + "|".join(CREDENTIAL_STATUS_PREPOSITIONS) + r") +\S",
-    re.IGNORECASE,
-)
-
 # A YAML block scalar indicator in either legal order, with an optional comment.
 BLOCK_INDICATOR = re.compile(r"[|>](?:[-+]?[1-9]?|[1-9][-+])(?:[ \t]+#.*)?[ \t]*$")
 
@@ -1284,10 +1266,11 @@ def classify_credential_value(rest: str, structured: bool, continued: str) -> bo
     holds only when the whole remainder after the exempt token is permitted punctuation
     or a comment, so `"${DATABASE_PASSWORD}"hunter2`, `""hunter2` and `_null` are
     credentials. The exceptions: an empty value, an exact bare null (`null`, `None`,
-    `~`), a pure variable reference or placeholder, and, for an unquoted prose or YAML
-    value, the one status sentence shape. A quoted value is a string, so `"null"` and
-    `"none"` are credentials. A block scalar indicator is a credential, because a block
-    scalar is a string whatever it holds.
+    `~`), and a pure variable reference or placeholder. Prose after a label is a
+    credential too: "Password: reset by hunter2" holds one. A note about a credential
+    leaves the colon out ("rotated the database password on Monday"). A quoted value is
+    a string, so `"null"` and `"none"` are credentials. A block scalar indicator is a
+    credential, because a block scalar is a string whatever it holds.
     """
     rest = rest.strip(" \t")
     if not rest:
@@ -1310,12 +1293,8 @@ def classify_credential_value(rest: str, structured: bool, continued: str) -> bo
     # Emphasis wrapped around the whole value is Markdown, so `_none_` is `none`.
     emphasis = EMPHASIS_VALUE.fullmatch(token)
     bare = emphasis.group("v") if emphasis else token
-    exempt = (
-        NULL_VALUE.fullmatch(bare) is not None
-        or PLACEHOLDER_VALUE.fullmatch(bare) is not None
-        or (not structured and STATUS_SENTENCE.match(rest) is not None)
-    )
-    return not (exempt and (tail_ok.fullmatch(tail) or STATUS_SENTENCE.match(rest)))
+    exempt = NULL_VALUE.fullmatch(bare) or PLACEHOLDER_VALUE.fullmatch(bare)
+    return not (exempt and tail_ok.fullmatch(tail))
 
 
 def labelled_credential(line: str, continued: str) -> bool:

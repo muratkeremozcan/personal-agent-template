@@ -423,10 +423,12 @@ the owner what happened.
   A labelled credential is any value after a `password`, `passwd`, `pwd`, `passcode`, `pin`, `secret`, `api key`, `token` or `client secret` label followed by `:` or `=`, in prose, env, JSON or YAML spelling, quoted or not, in any case, with or without a prefix such as `DB_` or `client_`.
   The same rules apply on every line, inside fenced code blocks included.
   A value continued on the indented lines below its label is read with the label, and a YAML block scalar indicator after a label (`password: >-`, `password: |2-`) is itself a credential, because a block scalar is a string whatever it holds.
-  Three exceptions keep accurate notes and configuration excerpts archivable, each judged on the value token itself so trailing `}`, `,`, `;` or a `# comment` changes nothing:
+  Two exceptions keep accurate configuration excerpts archivable, each judged on the value token itself so trailing `}`, `,`, `;` or a `# comment` changes nothing:
   an empty value or an exact bare `null`, `None` or `~`;
-  a pure variable reference or placeholder (`${DATABASE_PASSWORD}`, `$DATABASE_PASSWORD`, `<your-api-key>`);
-  and, for an unquoted value, one status sentence shape: an operational past participle, then a preposition, then the rest ("Password: reset by IT on Friday", "Password: stored in the team vault"; `CREDENTIAL_STATUS_VERBS` and `CREDENTIAL_STATUS_PREPOSITIONS` in the script).
+  and a pure variable reference or placeholder (`${DATABASE_PASSWORD}`, `$DATABASE_PASSWORD`, `<your-api-key>`).
+  Prose after a label is a credential too, because "Password: reset by hunter2" holds one and no text rule tells it apart from "Password: reset by IT".
+  A false pass syncs a secret that cannot be recalled, and a false positive costs a rewording.
+  To record a status note about a credential, write the label without a colon after it: "Rotated the database password on Monday", "The staging password was reset by IT after the audit".
   A quoted value is a string, so `"null"`, `"none"` and `"reset by IT"` count, and so does a reference with a default (`${DATABASE_PASSWORD:-hunter2}`).
   The whole value is classified with every literal character kept, so `_null` and `___` count, and so does shell concatenation such as `"${DATABASE_PASSWORD}"hunter2` or `""hunter2`.
   Markdown emphasis around the whole value is the only thing removed (`_none_` reads as `none`).

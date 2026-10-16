@@ -735,13 +735,14 @@ class CredentialShapeTests(GateTestCase):
         ),
     }
 
+    # A note about a credential passes when the label has no colon after it.
     PROSE_LINES = (
         "Lena rotated the CI token and the deploy key on Friday.",
-        "Password: reset by IT on Friday after the audit.",
-        "Password: stored in the team vault.",
-        "Password: rotated on Friday, see the runbook.",
+        "Rotated the database password on Monday.",
+        "The staging password was reset by IT after the audit.",
+        "The API key is stored in the team vault.",
+        "Changed the admin passcode on 2026-05-04, see the runbook.",
         "password: none",
-        "Password: changed on 2026-05-04",
         "Rotation: the client secret was replaced on Friday.",
         "Clone with git@github.com:acme/acme-gateway.git as usual.",
         "Docs live at https://docs.example.com/guide for reference.",
@@ -767,6 +768,11 @@ class CredentialShapeTests(GateTestCase):
         '{"api_key": null, "password": "hunter22"}',
         "password: none, actually hunter22",
         "Password: rotated",
+        "Password: reset by hunter2",
+        "Password: rotated on Monday",
+        "password: changed in vault",
+        "Password: reset by IT on Friday after the audit.",
+        "Password: stored in the team vault.",
         "Password: changed to Hunter2024!",
         "PIN: reset to 4821",
         "token: regenerated with abc123xyz",
