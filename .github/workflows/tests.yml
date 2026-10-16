@@ -142,3 +142,20 @@ jobs:
           args: >-
             --offline --include-fragments --no-progress
             README.md docs skills
+
+  # The one check branch protection requires. Matrix check names carry the Python
+  # version, so requiring them directly would break each time the ceiling moves. This job
+  # runs whatever the others did and passes only when every one of them succeeded, so a
+  # failed, skipped or cancelled leg fails it.
+  ci:
+    if: always()
+    needs: [unittest, smoke, lint, links]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require every job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          jq -e 'all(.[]; .result == "success")' <<<"$NEEDS" >/dev/null
