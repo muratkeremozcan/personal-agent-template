@@ -38,6 +38,7 @@ Usage:
                   awareness, but it never determines where the sanctum lives.
 """
 
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -69,7 +70,7 @@ def emit(path: Path) -> None:
         print(f"(missing: {path.name})")
 
 
-def emit_curation_notice(sanctum: Path) -> None:
+def emit_curation_notice(sanctum: Path, project_root: Path) -> None:
     """Fire the curation pass from waking itself, so nothing has to schedule it.
 
     A soft token guardrail that only runs when someone remembers to ask for it
@@ -93,7 +94,7 @@ def emit_curation_notice(sanctum: Path) -> None:
         "Remember or Recall, or they are mid-thread, do the pass after their "
         "work is done, and never announce it as a status report.\n"
         "Exact token counts: uv run "
-        f"{shlex.quote(str(CURATE_SCRIPT))} {shlex.quote(str(sanctum.parent.parent.parent))}"
+        f"{shlex.quote(str(CURATE_SCRIPT))} {shlex.quote(str(project_root))}"
     )
 
 
@@ -138,6 +139,10 @@ def emit_damage_report(home: Path, sanctum: Path, missing: list[str], project_ro
 
 
 def main() -> int:
+    # Identity files are printed verbatim, U+FFFD from a bad byte included. A pipe on
+    # a legacy code page cannot encode every character, and waking must not crash
+    # over one.
+    sys.stdout.reconfigure(errors="replace")
     args = sys.argv[1:]
     positional = [a for a in args if not a.startswith("--")]
     if not positional:
@@ -159,7 +164,8 @@ def main() -> int:
         return 1
     sanctum = home / "_bmad" / "memory" / SKILL_NAME
 
-    if not sanctum.exists():
+    # lexists, so a dangling symlink at the sanctum path reads as damaged.
+    if not os.path.lexists(sanctum):
         print("MODE: FIRST_BREATH")
         print(f"Invoked from: {project_root}")
         print(f"NO SANCTUM at {sanctum}")
@@ -192,7 +198,7 @@ def main() -> int:
     print(f"Sanctum: {sanctum}")
     for name in IDENTITY_FILES:
         emit(sanctum / name)
-    emit_curation_notice(sanctum)
+    emit_curation_notice(sanctum, project_root)
     return 0
 
 

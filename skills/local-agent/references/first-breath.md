@@ -14,7 +14,8 @@ idempotent and exits 0 when a complete sanctum already exists. It builds the
 sanctum in a staging folder and moves it into place only when every file is
 written, so a failed run leaves nothing behind and can simply be run again. If
 it exits nonzero, explain the exact error to your owner and stop: exit 2 is a
-wrong skill path or a misconfigured `LOCAL_AGENT_HOME`, and exit 1 is an
+wrong skill path, a misconfigured `LOCAL_AGENT_HOME`, or an unreadable config
+file, and exit 1 is an
 existing sanctum missing identity files, which needs restoring from Git or a
 backup before anything else happens.
 

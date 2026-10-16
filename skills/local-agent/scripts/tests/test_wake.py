@@ -118,7 +118,11 @@ class ModeTests(unittest.TestCase):
             result = run_wake(
                 project,
                 fake_home,
-                env_overrides={"LOCAL_AGENT_HOME": None, "HOME": fake_home},
+                env_overrides={
+                    "LOCAL_AGENT_HOME": None,
+                    "HOME": fake_home,
+                    "USERPROFILE": fake_home,
+                },
             )
             self.assertEqual(result.returncode, 0)
             self.assertIn("MODE: WAKING", result.stdout)
@@ -179,6 +183,22 @@ class DamagedSanctumTests(unittest.TestCase):
             )
             self.assertNotIn("move it aside", result.stdout)
             self.assertEqual((sanctum / "BOND.md").read_text(), "# Bond with Alex")
+
+    def test_dangling_symlink_at_the_sanctum_path_reports_damage(self):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            tempfile.TemporaryDirectory() as project,
+        ):
+            sanctum = Path(home) / "_bmad" / "memory" / "local-agent"
+            sanctum.parent.mkdir(parents=True)
+            try:
+                sanctum.symlink_to(Path(home) / "synced-elsewhere")
+            except OSError:
+                self.skipTest("symlinks unavailable")
+            result = run_wake(project, home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("MODE: DAMAGED", result.stdout)
+            self.assertNotIn("FIRST_BREATH", result.stdout)
 
     def test_unborn_folder_without_identity_files_reports_damage(self):
         """The folder an interrupted scaffold used to leave behind."""

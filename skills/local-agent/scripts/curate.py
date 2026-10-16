@@ -278,17 +278,26 @@ def stale_session_logs(sanctum: Path, days: int, today: date) -> dict:
     return out
 
 
-def listed_in(index_text: str, name: str) -> bool:
-    """Whether INDEX.md names `name` as a whole path component.
+def listed_in(index_text: str, candidate: str) -> bool:
+    """Whether INDEX.md names `candidate`, a path relative to the sanctum.
 
     A substring test counted `notes.md` as listed when the index only mentioned
-    `meeting-notes.md`, so a lost file read as found. The name must stand alone: no
-    filename character directly before it, and no filename character or further
-    extension directly after it. A slash before it is fine, so `knowledge/notes.md`
-    still lists `notes.md`.
+    `meeting-notes.md`, so a lost file read as found. The index may name the full
+    path or any tail of it that starts at a component (`knowledge/a/notes.md`,
+    `a/notes.md`, `notes.md`), and that tail must stand alone: no path character
+    directly before it, so `knowledge/notes.md` never lists a root `notes.md`, and
+    no filename character or further extension directly after a file. A folder is
+    named with its trailing slash, so prose that happens to say "drafts" leaves an
+    unlisted `drafts/` reported.
     """
-    pattern = rf"(?<![\w.-]){re.escape(name)}(?![\w-]|\.\w)"
-    return re.search(pattern, index_text) is not None
+    is_dir = candidate.endswith("/")
+    parts = candidate.rstrip("/").split("/")
+    after = "" if is_dir else r"(?![\w-]|\.\w)"
+    for i in range(len(parts)):
+        tail = "/".join(parts[i:]) + ("/" if is_dir else "")
+        if re.search(rf"(?<![\w./-]){re.escape(tail)}{after}", index_text):
+            return True
+    return False
 
 
 def index_drift(sanctum: Path) -> dict:
@@ -323,7 +332,7 @@ def index_drift(sanctum: Path) -> dict:
             continue
         candidates.append(entry.name + ("/" if entry.is_dir() else ""))
 
-    unlisted = [c for c in candidates if not listed_in(index_text, Path(c).name)]
+    unlisted = [c for c in candidates if not listed_in(index_text, c)]
     return {"unlisted": unlisted, "has_index": index.is_file()}
 
 

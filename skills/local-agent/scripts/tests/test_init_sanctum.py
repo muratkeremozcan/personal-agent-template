@@ -9,6 +9,7 @@ import importlib.util
 import io
 import os
 import tempfile
+import time
 import unittest
 from datetime import date
 from pathlib import Path
@@ -102,13 +103,22 @@ class ScaffoldTests(InitCase):
     def test_no_staging_folder_is_left_behind(self):
         self.assertEqual(sorted(p.name for p in self.sanctum.parent.iterdir()), ["local-agent"])
 
-    def test_second_run_is_idempotent(self):
+    def test_second_run_before_birth_says_to_resume(self):
         memory = self.sanctum / "MEMORY.md"
         memory.write_text("owner-edited content should survive")
         code, out, _ = self.run_init()
         self.assertEqual(code, 0)
-        self.assertIn("already been born. Skipping", out)
+        self.assertIn("Skipping First Breath scaffolding.", out)
+        self.assertIn("resume First Breath", out)
+        self.assertNotIn("already been born", out)
         self.assertEqual(memory.read_text(), "owner-edited content should survive")
+
+    def test_second_run_after_birth_says_born(self):
+        (self.sanctum / ".born").write_text(BIRTH.isoformat())
+        code, out, _ = self.run_init()
+        self.assertEqual(code, 0)
+        self.assertIn("This agent has already been born.", out)
+        self.assertNotIn("resume", out)
 
 
 class ConfigTests(InitCase):
@@ -169,11 +179,41 @@ class FailureTests(InitCase):
         stale = self.sanctum.parent / "local-agent.partial-4242-deadbeef"
         (stale / "references").mkdir(parents=True)
         (stale / "INDEX.md").write_text("half written")
+        old = time.time() - init_sanctum.STALE_STAGING_SECONDS - 60
+        os.utime(stale, (old, old))
         code, out, err = self.run_init()
         self.assertEqual(code, 0, err)
         self.assertFalse(stale.exists())
         self.assertIn(f"Removed {stale.name}", out)
         self.assertTrue((self.sanctum / "INDEX.md").is_file())
+
+    def test_staging_of_a_run_still_building_is_left_alone(self):
+        live = self.sanctum.parent / "local-agent.partial-4243-cafebabe"
+        live.mkdir(parents=True)
+        code, out, err = self.run_init()
+        self.assertEqual(code, 0, err)
+        self.assertTrue(live.is_dir())
+        self.assertNotIn("Removed", out)
+
+    def test_dangling_symlink_at_the_sanctum_path_is_never_scaffolded_over(self):
+        self.sanctum.parent.mkdir(parents=True)
+        try:
+            self.sanctum.symlink_to(self.home / "moved-away")
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        code, _, err = self.run_init()
+        self.assertEqual(code, 1)
+        self.assertIn("is missing INDEX.md", err)
+        self.assertTrue(self.sanctum.is_symlink())
+
+    def test_malformed_config_is_a_configuration_error(self):
+        (self.home / "_bmad").mkdir()
+        # Invalid UTF-8 fails under tomllib and under the 3.10 fallback parser alike.
+        (self.home / "_bmad" / "config.toml").write_bytes(b'[core]\nuser_name = "caf\xe9"\n')
+        code, _, err = self.run_init()
+        self.assertEqual(code, 2)
+        self.assertIn(f"cannot read {self.home / '_bmad' / 'config.toml'}", err)
+        self.assertFalse(self.sanctum.exists())
 
     def test_damaged_sanctum_is_never_scaffolded_over(self):
         (self.sanctum / "sessions").mkdir(parents=True)

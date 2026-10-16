@@ -244,6 +244,15 @@ class HomeTests(unittest.TestCase):
         ):
             _sanctum.archive_root()
 
+    def test_relative_archive_is_refused(self):
+        with tempfile.TemporaryDirectory() as home:
+            env = {"LOCAL_AGENT_HOME": home, "LOCAL_AGENT_ARCHIVE": "archive"}
+            with (
+                mock.patch.dict(os.environ, env),
+                self.assertRaisesRegex(_sanctum.ArchiveMisconfigured, "relative path"),
+            ):
+                _sanctum.archive_root()
+
     def test_default_home_may_not_exist_yet(self):
         """Nobody mistypes a value they never set, so a missing default is a first birth."""
         with tempfile.TemporaryDirectory() as fake_home:
@@ -339,6 +348,7 @@ class WakeNoticeTests(unittest.TestCase):
             )
             script, target = shlex.split(line.split("uv run ", 1)[1])
             self.assertTrue(Path(script).is_absolute(), script)
+            self.assertEqual(target, str(Path(project).resolve()))
             ran = subprocess.run(
                 [sys.executable, script, target],
                 capture_output=True, text=True, check=False, cwd=project,

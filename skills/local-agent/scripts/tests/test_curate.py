@@ -202,6 +202,28 @@ class IndexDriftTests(CurateCase):
         (s / "knowledge" / "notes.md").write_text("x")
         self.assertEqual(curate.index_drift(s)["unlisted"], [])
 
+    def test_a_nested_mention_does_not_list_a_root_file_of_the_same_name(self):
+        s = self.make_sanctum()
+        (s / "INDEX.md").write_text("- `knowledge/notes.md` — imported\n")
+        (s / "notes.md").write_text("root")
+        (s / "knowledge").mkdir()
+        (s / "knowledge" / "notes.md").write_text("nested")
+        self.assertEqual(curate.index_drift(s)["unlisted"], ["notes.md"])
+
+    def test_a_folder_needs_its_trailing_slash(self):
+        s = self.make_sanctum()
+        (s / "INDEX.md").write_text("- old drafts were merged into the plan\n")
+        (s / "drafts").mkdir()
+        self.assertEqual(curate.index_drift(s)["unlisted"], ["drafts/"])
+
+    def test_a_tail_of_a_nested_path_lists_it(self):
+        s = self.make_sanctum()
+        (s / "INDEX.md").write_text("## Knowledge\n- `team/roster.md`\n- `other/plan.md`\n")
+        (s / "knowledge" / "team").mkdir(parents=True)
+        (s / "knowledge" / "team" / "roster.md").write_text("x")
+        (s / "knowledge" / "plan.md").write_text("x")
+        self.assertEqual(curate.index_drift(s)["unlisted"], ["knowledge/plan.md"])
+
     def test_index_drift_ignores_bytecode_caches_in_capabilities(self):
         s = self.make_sanctum()
         (s / "INDEX.md").write_text("- capabilities/real.md\n")

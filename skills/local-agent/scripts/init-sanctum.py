@@ -40,10 +40,12 @@ import re
 import secrets
 import shutil
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _sanctum import (
+    BORN_MARKER,
     SKILL_NAME,
     HomeMisconfigured,
     local_today,
@@ -275,14 +277,25 @@ def substitute_vars(content: str, variables: dict) -> str:
     return content
 
 
+# A scaffold builds in well under a second, so a staging folder this old belongs
+# to a run that was killed. A younger one may belong to a run still building.
+STALE_STAGING_SECONDS = 600
+
+
 def clean_stale_staging(sanctum: Path) -> list[str]:
-    """Remove staging folders a failed run left beside the sanctum."""
+    """Remove staging folders a killed run left beside the sanctum.
+
+    A run that fails with an exception removes its own staging folder, so only a
+    run stopped from outside (a kill, a power cut) leaves one. Age is what tells
+    it apart from a concurrent run that is still building.
+    """
     parent = sanctum.parent
     if not parent.is_dir():
         return []
+    cutoff = time.time() - STALE_STAGING_SECONDS
     removed = []
     for stale in sorted(parent.glob(f"{sanctum.name}.partial-*")):
-        if stale.is_dir():
+        if stale.is_dir() and stale.stat().st_mtime < cutoff:
             shutil.rmtree(stale)
             removed.append(stale.name)
     return removed
@@ -386,7 +399,8 @@ def main(argv: list[str] | None = None) -> int:
     for name in clean_stale_staging(sanctum):
         print(f"Removed {name}, left by an earlier run that did not finish")
 
-    if sanctum.exists():
+    # lexists, so a dangling symlink at the sanctum path counts as present and damaged.
+    if os.path.lexists(sanctum):
         missing = missing_identity_files(sanctum)
         if missing:
             # The same state wake.py reports as DAMAGED. Scaffolding over it would bury
@@ -399,8 +413,14 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        print(f"Sanctum already exists at {sanctum}")
-        print("This agent has already been born. Skipping First Breath scaffolding.")
+        print(f"Sanctum already exists at {sanctum}. Skipping First Breath scaffolding.")
+        if (sanctum / BORN_MARKER).is_file():
+            print("This agent has already been born.")
+        else:
+            print(
+                f"The scaffold is complete and {BORN_MARKER} is absent: resume First Breath "
+                "from what the files already hold."
+            )
         return 0
 
     # Load config
@@ -411,7 +431,13 @@ def main(argv: list[str] | None = None) -> int:
         ("config.user.yaml", parse_yaml_config),
         ("config.user.toml", parse_toml_config),
     ]:
-        config.update(config_parser(bmad_dir / config_file))
+        config_path = bmad_dir / config_file
+        try:
+            config.update(config_parser(config_path))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            # tomllib.TOMLDecodeError is a ValueError.
+            print(f"error: cannot read {config_path}: {exc}", file=sys.stderr)
+            return 2
 
     # Build variable substitution map
     today = local_today().isoformat()

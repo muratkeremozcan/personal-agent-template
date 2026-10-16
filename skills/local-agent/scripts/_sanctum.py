@@ -186,8 +186,14 @@ def archive_root() -> Path | None:
     except HomeMisconfigured as exc:
         raise ArchiveMisconfigured(f"cannot place or check the archive: {exc}") from exc
     override = os.environ.get("LOCAL_AGENT_ARCHIVE")
-    root = Path(override) if override else home / "archive"
-    root = root.expanduser().resolve()
+    root = Path(override).expanduser() if override else home / "archive"
+    if not root.is_absolute():
+        # Relative to cwd, every repo the session opens in would get its own archive.
+        raise ArchiveMisconfigured(
+            f"LOCAL_AGENT_ARCHIVE is set to {override!r}, a relative path. "
+            "Set it to an absolute path."
+        )
+    root = root.resolve()
     if root.is_dir():
         sanctum = home / "_bmad" / "memory" / SKILL_NAME
         if _overlaps(root, sanctum):
