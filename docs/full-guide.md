@@ -350,6 +350,11 @@ was kept, and the run exits 1. `--force` repoints links into another checkout,
 `--dry-run` prints the plan and touches nothing, and a second run changes
 nothing.
 
+Every removal relies on an atomic no-replace rename: `renamex_np` on macOS, or
+`renameat2` with `RENAME_NOREPLACE` on Linux, on a filesystem that supports it.
+The installer checks each filesystem it will write to first and refuses with
+exit status 2 when the rename is unavailable.
+
 Confirm that each selected tool can discover `local-agent` before continuing.
 The [custom-module installation guide](https://docs.bmad-method.org/how-to/install-custom-modules/)
 also documents non-interactive installation and other local-path layouts.
