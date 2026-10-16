@@ -137,8 +137,19 @@ def parse_toml_config(config_path: Path) -> dict:
         return _flatten_scalar_config(tomllib.load(config_file))
 
 
+# A bare `>` or `|` (with an optional chomping sign) opens a block whose text is on
+# the indented lines that follow.
+BLOCK_INDICATOR = re.compile(r"^[>|][+-]?$")
+
+
 def parse_frontmatter(file_path: Path) -> dict:
-    """Extract YAML frontmatter from a markdown file."""
+    """Extract top-level scalar keys from a markdown file's YAML frontmatter.
+
+    A value may continue on indented lines below its key, as a plain multi-line
+    scalar or after a `>` or `|` block indicator. The lines are joined with single
+    spaces, which is how the value renders in a one-line table cell. Reading only
+    the key's own line once rendered Recall and Remember with empty descriptions.
+    """
     meta = {}
     with open(file_path, encoding="utf-8") as f:
         content = f.read()
@@ -147,10 +158,24 @@ def parse_frontmatter(file_path: Path) -> dict:
     if not match:
         return meta
 
-    for line in match.group(1).strip().split("\n"):
-        if ":" in line:
-            key, _, value = line.partition(":")
-            meta[key.strip()] = value.strip().strip("'\"")
+    key = None
+    parts: list[str] = []
+
+    def store() -> None:
+        if key is not None:
+            meta[key] = " ".join(p for p in parts if p).strip().strip("'\"")
+
+    for line in match.group(1).split("\n"):
+        if key is not None and line[:1] in (" ", "\t"):
+            parts.append(line.strip())
+            continue
+        if ":" in line and not line.lstrip().startswith("#"):
+            store()
+            raw_key, _, value = line.partition(":")
+            key = raw_key.strip()
+            value = value.strip()
+            parts = [] if BLOCK_INDICATOR.match(value) else [value]
+    store()
     return meta
 
 
@@ -198,6 +223,13 @@ def discover_capabilities(references_dir: Path, sanctum_refs_path: str) -> list[
             continue
         meta = parse_frontmatter(md_file)
         if meta.get("name") and meta.get("code"):
+            if not meta.get("description"):
+                # An empty cell in CAPABILITIES.md tells the agent nothing about when
+                # to reach for the capability, so it is a broken bundle.
+                raise ValueError(
+                    f"{md_file} declares capability {meta['code']} with no description "
+                    "in its frontmatter"
+                )
             if meta.get("type") == "external" and meta.get("external-skill"):
                 source = f"External: `{meta['external-skill']}`"
             else:
@@ -302,7 +334,7 @@ def clean_stale_staging(sanctum: Path) -> list[str]:
 
 
 def build_sanctum(
-    staging: Path, skill_path: Path, variables: dict, sanctum_refs_path: str
+    staging: Path, skill_path: Path, variables: dict, capabilities: list[dict]
 ) -> None:
     """Write the whole scaffold into `staging`, which becomes the sanctum on success."""
     assets_dir = skill_path / "assets"
@@ -340,7 +372,6 @@ def build_sanctum(
         print(f"  Created {output_name}")
 
     # Auto-generate CAPABILITIES.md from references/ frontmatter
-    capabilities = discover_capabilities(references_dir, sanctum_refs_path)
     capabilities_content = generate_capabilities_md(capabilities, evolvable=EVOLVABLE)
     (staging / "CAPABILITIES.md").write_text(capabilities_content, encoding="utf-8")
     print(
@@ -386,6 +417,13 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    # Relative path for CAPABILITIES.md references (agent loads from within sanctum)
+    sanctum_refs_path = "references"
+    try:
+        capabilities = discover_capabilities(skill_path / "references", sanctum_refs_path)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     # Paths. The sanctum and the config it is seeded from both live at the canonical
     # home; wake.py resolves the same function, so the two can never disagree. Building
@@ -398,9 +436,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     bmad_dir = home / "_bmad"
     sanctum = bmad_dir / "memory" / SKILL_NAME
-
-    # Relative path for CAPABILITIES.md references (agent loads from within sanctum)
-    sanctum_refs_path = "references"
 
     for name in clean_stale_staging(sanctum):
         print(f"Removed {name}, left by an earlier run that did not finish")
@@ -461,7 +496,7 @@ def main(argv: list[str] | None = None) -> int:
     staging.mkdir()
     print(f"Building sanctum in {staging}")
     try:
-        build_sanctum(staging, skill_path, variables, sanctum_refs_path)
+        build_sanctum(staging, skill_path, variables, capabilities)
         incomplete = missing_identity_files(staging)
         if incomplete:
             shutil.rmtree(staging)

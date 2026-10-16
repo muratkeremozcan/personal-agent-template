@@ -92,6 +92,22 @@ class ScaffoldTests(InitCase):
         self.assertNotIn("External:", capabilities)
         self.assertIn("## Learned", capabilities)  # evolvable
 
+    def test_every_built_in_capability_renders_its_description(self):
+        rows = [
+            line for line in
+            (self.sanctum / "CAPABILITIES.md").read_text(encoding="utf-8").splitlines()
+            if line.startswith("| [")
+        ]
+        self.assertGreaterEqual(len(rows), 3)
+        for row in rows:
+            code, name, description, _source = (c.strip() for c in row.strip("|").split("|"))
+            self.assertTrue(description, f"{code} {name} renders an empty description")
+        self.assertIn(
+            "| [RCL] | Recall | Surface what's stored in the sanctum about the owner, their "
+            "work, or past sessions |",
+            "\n".join(rows),
+        )
+
     def test_bundle_only_files_stay_in_the_bundle(self):
         self.assertFalse((self.sanctum / "references" / "first-breath.md").exists())
         self.assertTrue((self.sanctum / "references" / "archive.md").is_file())
@@ -255,7 +271,41 @@ class FailureTests(InitCase):
         self.assertFalse(typo.exists())
 
 
+class FrontmatterTests(unittest.TestCase):
+    def parse(self, frontmatter):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cap.md"
+            path.write_text(f"---\n{frontmatter}---\nbody\n", encoding="utf-8")
+            return init_sanctum.parse_frontmatter(path)
+
+    def test_plain_value(self):
+        self.assertEqual(self.parse("name: X\ndescription: does x\n")["description"], "does x")
+
+    def test_continuation_lines_join_with_spaces(self):
+        meta = self.parse("name: X\ndescription:\n  first line,\n  second line\ncode: XX\n")
+        self.assertEqual(meta["description"], "first line, second line")
+        self.assertEqual(meta["code"], "XX")
+
+    def test_folded_and_literal_block_indicators(self):
+        for indicator in (">", ">-", "|", "|-"):
+            with self.subTest(indicator=indicator):
+                meta = self.parse(f"description: {indicator}\n  one\n  two\ncode: XX\n")
+                self.assertEqual(meta["description"], "one two")
+                self.assertEqual(meta["code"], "XX")
+
+    def test_continuation_of_a_quoted_value(self):
+        meta = self.parse('description: "starts here\n  and ends here"\n')
+        self.assertEqual(meta["description"], "starts here and ends here")
+
+
 class CapabilityFormattingTests(unittest.TestCase):
+    def test_a_capability_without_a_description_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            refs = Path(tmp)
+            (refs / "bare.md").write_text("---\nname: Z\ndescription:\ncode: ZZ\n---\nbody\n")
+            with self.assertRaisesRegex(ValueError, r"bare\.md.*description"):
+                init_sanctum.discover_capabilities(refs, "references")
+
     def test_external_capability_source_formatting(self):
         with tempfile.TemporaryDirectory() as tmp:
             refs = Path(tmp)
