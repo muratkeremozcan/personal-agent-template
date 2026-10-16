@@ -78,7 +78,8 @@ jobs:
         run: |
           set -euo pipefail
           scripts=skills/local-agent/scripts
-          mkdir -p "$HOME" "$PROJECT"
+          # An explicit LOCAL_AGENT_HOME names a directory the owner already made.
+          mkdir -p "$HOME" "$LOCAL_AGENT_HOME" "$PROJECT"
 
           # uv only warns when the pinned interpreter falls outside a script's
           # requires-python, so the warning is promoted to a failure here.
