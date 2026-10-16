@@ -252,6 +252,19 @@ class InstallGlobalTests(unittest.TestCase):
         self.assertEqual(refusal.exception.conflicts, [f"{locked}: directory is not writable"])
         self.assertEqual(links_under(self.home), [])
 
+    @unittest.skipIf(os.geteuid() == 0, "root can write a read-only directory")
+    def test_rerun_succeeds_when_a_correct_link_sits_in_a_read_only_directory(self):
+        first = install_global.install(self.source, self.home)
+        locked = self.home / ".codex/skills"
+        locked.chmod(0o500)
+        self.addCleanup(locked.chmod, 0o700)
+
+        second = install_global.install(self.source, self.home)
+
+        self.assertEqual(
+            statuses(second), [(change.destination, "unchanged") for change in first]
+        )
+
     def test_refuses_before_setup_has_written_skill_md(self):
         (self.source / "SKILL.md").unlink()
 

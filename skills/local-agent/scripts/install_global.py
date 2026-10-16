@@ -141,9 +141,6 @@ def plan(source: Path, home: Path, force: bool = False) -> list[Change]:
             destination = home / directory / name
             target = os.path.relpath(link_source, start=destination.parent.resolve())
 
-            for conflict in _parent_conflicts(home, destination):
-                conflicts[conflict] = None
-
             if destination.is_symlink():
                 previous = os.readlink(destination)
                 current = _live_target(destination)
@@ -159,8 +156,13 @@ def plan(source: Path, home: Path, force: bool = False) -> list[Change]:
             elif os.path.lexists(destination):
                 kind = "directory" if destination.is_dir() else "file"
                 conflicts[f"{destination}: real {kind}; only symlinks are replaced"] = None
+                continue
             else:
                 changes.append(Change(destination, "installed", link_source, target))
+
+            # Only destinations that will be written need a creatable, writable parent.
+            for conflict in _parent_conflicts(home, destination):
+                conflicts[conflict] = None
 
     if conflicts:
         raise InstallRefused(list(conflicts))
