@@ -13,6 +13,11 @@ and auto-generates CAPABILITIES.md from capability prompt frontmatter.
 After this script runs, the sanctum is fully self-contained: the agent does
 not depend on the skill bundle location for normal operation.
 
+The sanctum is built in a sibling staging folder and moved into place in one
+rename at the end, so the sanctum path holds either nothing or a complete
+scaffold. A run that fails partway leaves only a `<name>.partial-*` folder, which
+the next run removes before it starts.
+
 This initializes the agent's runtime sanctum memory. It reads supported BMad
 YAML and TOML config files strictly to substitute values into the sanctum
 templates. It never writes or authors config. Build-time customization remains
@@ -24,15 +29,27 @@ Usage:
     project-root: The project you are working in. Recorded in the templates and
                   printed back; it plays no part in where the sanctum lives.
     skill-path:   Path to the skill directory (where SKILL.md, references/, assets/ live)
+
+Exit codes: 0 scaffolded or already present, 1 a damaged sanctum is in the way,
+2 usage or configuration error.
 """
 
+import argparse
+import os
 import re
+import secrets
 import shutil
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _sanctum import local_today, sanctum_home, sanctum_path
+from _sanctum import (
+    SKILL_NAME,
+    HomeMisconfigured,
+    local_today,
+    missing_identity_files,
+    sanctum_home,
+)
 
 try:
     import tomllib
@@ -258,72 +275,38 @@ def substitute_vars(content: str, variables: dict) -> str:
     return content
 
 
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: uv run init-sanctum.py <project-root> <skill-path>")
-        sys.exit(1)
+def clean_stale_staging(sanctum: Path) -> list[str]:
+    """Remove staging folders a failed run left beside the sanctum."""
+    parent = sanctum.parent
+    if not parent.is_dir():
+        return []
+    removed = []
+    for stale in sorted(parent.glob(f"{sanctum.name}.partial-*")):
+        if stale.is_dir():
+            shutil.rmtree(stale)
+            removed.append(stale.name)
+    return removed
 
-    project_root = Path(sys.argv[1]).resolve()
-    skill_path = Path(sys.argv[2]).resolve()
 
-    # Paths. The sanctum and the config it is seeded from both live at the canonical
-    # home; wake.py resolves the same function, so the two can never disagree. Building
-    # them from project_root once scaffolded a sanctum that wake.py never found, and
-    # First Breath started over on every activation from another directory.
-    bmad_dir = sanctum_home() / "_bmad"
-    sanctum = sanctum_path()
+def build_sanctum(
+    staging: Path, skill_path: Path, variables: dict, sanctum_refs_path: str
+) -> None:
+    """Write the whole scaffold into `staging`, which becomes the sanctum on success."""
     assets_dir = skill_path / "assets"
     references_dir = skill_path / "references"
     scripts_dir = skill_path / "scripts"
 
-    # Sanctum subdirectories
-    sanctum_refs = sanctum / "references"
-    sanctum_scripts = sanctum / "scripts"
-
-    # Relative path for CAPABILITIES.md references (agent loads from within sanctum)
-    sanctum_refs_path = "references"
-
-    # Check if sanctum already exists
-    if sanctum.exists():
-        print(f"Sanctum already exists at {sanctum}")
-        print("This agent has already been born. Skipping First Breath scaffolding.")
-        sys.exit(0)
-
-    # Load config
-    config = {}
-    for config_file, parser in [
-        ("config.yaml", parse_yaml_config),
-        ("config.toml", parse_toml_config),
-        ("config.user.yaml", parse_yaml_config),
-        ("config.user.toml", parse_toml_config),
-    ]:
-        config.update(parser(bmad_dir / config_file))
-
-    # Build variable substitution map
-    today = local_today().isoformat()
-    variables = {
-        "user_name": config.get("user_name", "friend"),
-        "communication_language": config.get("communication_language", "English"),
-        "birth_date": today,
-        "project_root": str(project_root),
-        "sanctum_path": str(sanctum),
-    }
-
-    # Create sanctum structure
-    sanctum.mkdir(parents=True, exist_ok=True)
-    (sanctum / "capabilities").mkdir(exist_ok=True)
-    (sanctum / "knowledge").mkdir(exist_ok=True)
-    (sanctum / "sessions").mkdir(exist_ok=True)
-    print(f"Created sanctum at {sanctum}")
+    for sub in ("capabilities", "knowledge", "sessions"):
+        (staging / sub).mkdir()
 
     # Copy reference files (capabilities + techniques + guidance) into sanctum
-    copied_refs = copy_references(references_dir, sanctum_refs)
+    copied_refs = copy_references(references_dir, staging / "references")
     print(f"  Copied {len(copied_refs)} reference files to sanctum/references/")
     for name in copied_refs:
         print(f"    - {name}")
 
     # Copy any supporting scripts into sanctum
-    copied_scripts = copy_scripts(scripts_dir, sanctum_scripts)
+    copied_scripts = copy_scripts(scripts_dir, staging / "scripts")
     if copied_scripts:
         print(f"  Copied {len(copied_scripts)} scripts to sanctum/scripts/")
         for name in copied_scripts:
@@ -344,23 +327,123 @@ def main():
         content = template_path.read_text(encoding="utf-8")
         content = substitute_vars(content, variables)
 
-        output_path = sanctum / output_name
-        output_path.write_text(content, encoding="utf-8")
+        (staging / output_name).write_text(content, encoding="utf-8")
         print(f"  Created {output_name}")
 
     # Auto-generate CAPABILITIES.md from references/ frontmatter
     capabilities = discover_capabilities(references_dir, sanctum_refs_path)
     capabilities_content = generate_capabilities_md(capabilities, evolvable=EVOLVABLE)
-    (sanctum / "CAPABILITIES.md").write_text(capabilities_content, encoding="utf-8")
+    (staging / "CAPABILITIES.md").write_text(capabilities_content, encoding="utf-8")
     print(
         f"  Created CAPABILITIES.md ({len(capabilities)} built-in capabilities discovered)"
     )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "project_root",
+        help="the project you are working in (recorded in the templates only)",
+    )
+    parser.add_argument(
+        "skill_path",
+        help="the skill directory holding references/ and assets/",
+    )
+    args = parser.parse_args(argv)
+
+    project_root = Path(args.project_root).resolve()
+    skill_path = Path(args.skill_path).resolve()
+
+    # Validate everything the build reads before anything is created, so a wrong
+    # skill path fails here with a clear message, before anything exists to clean up.
+    absent = [d for d in ("references", "assets") if not (skill_path / d).is_dir()]
+    if absent:
+        print(
+            f"error: {skill_path} is not a local-agent skill directory: "
+            f"missing {', '.join(f'{d}/' for d in absent)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Paths. The sanctum and the config it is seeded from both live at the canonical
+    # home; wake.py resolves the same function, so the two can never disagree. Building
+    # them from project_root once scaffolded a sanctum that wake.py never found, and
+    # First Breath started over on every activation from another directory.
+    try:
+        home = sanctum_home()
+    except HomeMisconfigured as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    bmad_dir = home / "_bmad"
+    sanctum = bmad_dir / "memory" / SKILL_NAME
+
+    # Relative path for CAPABILITIES.md references (agent loads from within sanctum)
+    sanctum_refs_path = "references"
+
+    for name in clean_stale_staging(sanctum):
+        print(f"Removed {name}, left by an earlier run that did not finish")
+
+    if sanctum.exists():
+        missing = missing_identity_files(sanctum)
+        if missing:
+            # The same state wake.py reports as DAMAGED. Scaffolding over it would bury
+            # a real identity under seed placeholders.
+            print(
+                f"error: a sanctum exists at {sanctum} but is missing "
+                f"{', '.join(missing)}. Restore those files from Git or a backup. If the "
+                "folder is only a scaffold left by an interrupted run, with no conversation "
+                "saved in it, move it aside and run this again.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"Sanctum already exists at {sanctum}")
+        print("This agent has already been born. Skipping First Breath scaffolding.")
+        return 0
+
+    # Load config
+    config = {}
+    for config_file, config_parser in [
+        ("config.yaml", parse_yaml_config),
+        ("config.toml", parse_toml_config),
+        ("config.user.yaml", parse_yaml_config),
+        ("config.user.toml", parse_toml_config),
+    ]:
+        config.update(config_parser(bmad_dir / config_file))
+
+    # Build variable substitution map
+    today = local_today().isoformat()
+    variables = {
+        "user_name": config.get("user_name", "friend"),
+        "communication_language": config.get("communication_language", "English"),
+        "birth_date": today,
+        "project_root": str(project_root),
+        "sanctum_path": str(sanctum),
+    }
+
+    sanctum.parent.mkdir(parents=True, exist_ok=True)
+    # mkdir, so the sanctum gets the owner's usual permissions once it is renamed.
+    staging = sanctum.parent / f"{sanctum.name}.partial-{os.getpid()}-{secrets.token_hex(4)}"
+    staging.mkdir()
+    print(f"Building sanctum in {staging}")
+    try:
+        build_sanctum(staging, skill_path, variables, sanctum_refs_path)
+        # One rename publishes the whole scaffold. It refuses a non-empty target, so a
+        # sanctum another run finished meanwhile is never overwritten.
+        os.replace(staging, sanctum)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    print(f"Created sanctum at {sanctum}")
 
     print()
     print("First Breath scaffolding complete.")
     print("The conversational awakening can now begin.")
     print(f"Sanctum: {sanctum}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -18,6 +18,7 @@ and dependency-free. curate.py adds tiktoken for exact counts on top of this.
 
 import os
 import re
+import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -75,20 +76,84 @@ def local_today() -> date:
     return datetime.now(timezone.utc).astimezone().date()
 
 
+class HomeMisconfigured(Exception):
+    """LOCAL_AGENT_HOME is relative, or names a directory that does not exist."""
+
+
 def sanctum_home() -> Path:
     """Canonical sanctum home: $LOCAL_AGENT_HOME if set, else ~/local-agent.
 
     Independent of invocation cwd/project-root on purpose — one sanctum, not one
     per repo. A per-repo sanctum would false-start First Breath any time the
     agent is invoked from another repo, which happened once.
+
+    The override is held to the same standard as LOCAL_AGENT_ARCHIVE, because a bad
+    value fails the same way: it reads as "no sanctum yet" and starts a second birth.
+    A relative value resolves against whatever directory the session opened in, which
+    is the per-repo sanctum all over again, so it is refused. An override naming a
+    directory that does not exist is far more often a typo than a new home, so it is
+    refused too; a deliberate new home is one `mkdir` away, and once the directory
+    exists an absent sanctum inside it is a genuine first birth. The default needs
+    neither check: nobody mistypes a value they never set.
     """
     override = os.environ.get("LOCAL_AGENT_HOME")
-    home = Path(override) if override else Path.home() / "local-agent"
-    return home.expanduser().resolve()
+    if not override:
+        return (Path.home() / "local-agent").resolve()
+    home = Path(override).expanduser()
+    if not home.is_absolute():
+        raise HomeMisconfigured(
+            f"LOCAL_AGENT_HOME is set to {override!r}, a relative path, which would put the "
+            "sanctum under whichever directory the session opened in. Set it to an absolute path."
+        )
+    home = home.resolve()
+    if not home.is_dir():
+        raise HomeMisconfigured(
+            f"LOCAL_AGENT_HOME is set to {override}, which is not an existing directory. "
+            "Correct the variable, unset it to use ~/local-agent, or create the directory "
+            "if this is a new home on purpose."
+        )
+    return home
 
 
 def sanctum_path() -> Path:
     return sanctum_home() / "_bmad" / "memory" / SKILL_NAME
+
+
+def missing_identity_files(sanctum: Path) -> list[str]:
+    """The identity files absent from a sanctum, in load order.
+
+    init-sanctum.py writes all of them before the sanctum appears at its path, so a
+    sanctum missing any of them was damaged after birth (a sync conflict, a partial
+    checkout, a stray delete) and needs restoring. Treating it as unborn would rerun
+    First Breath over a real identity.
+    """
+    return [name for name in IDENTITY_FILES if not (sanctum / name).is_file()]
+
+
+# Every file that could not be decoded this run, for reports that collect warnings.
+DECODE_WARNINGS: list[str] = []
+
+
+def read_text(path: Path) -> str:
+    """A sanctum file as text, readable even when one byte of it is not UTF-8.
+
+    One bad byte from a sync tool or an editor once made waking and curation exit
+    with a traceback, which locks the owner out of their own agent over a character.
+    The bad bytes read as U+FFFD and a warning naming the file goes to stderr, once
+    per file per run, so the damage is visible and everything else still loads.
+    """
+    data = path.read_bytes()
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        warning = (
+            f"{path} is not valid UTF-8 (first bad byte at offset {exc.start}); "
+            "undecodable bytes were read as U+FFFD"
+        )
+        if warning not in DECODE_WARNINGS:
+            DECODE_WARNINGS.append(warning)
+            print(f"warning: {warning}", file=sys.stderr)
+        return data.decode("utf-8", errors="replace")
 
 
 class ArchiveMisconfigured(Exception):
@@ -117,7 +182,7 @@ def archive_root() -> Path | None:
     root = root.expanduser().resolve()
     if root.is_dir():
         sanctum = sanctum_path()
-        if root == sanctum or sanctum in root.parents or root in sanctum.parents:
+        if _overlaps(root, sanctum):
             # An archive inside the sanctum defeats the entire purpose: it would be
             # loaded on waking, counted against the token budget, and curated like
             # identity. An archive that *contains* the sanctum is worse, because
@@ -136,6 +201,28 @@ def archive_root() -> Path | None:
             "Create it, correct the variable, or unset it to run without an archive."
         )
     return None
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _overlaps(root: Path, sanctum: Path) -> bool:
+    """Whether the archive is, sits inside, or contains the sanctum.
+
+    The spelling comparison alone misses a case-swapped path on a case-insensitive
+    filesystem (APFS and NTFS by default): `_BMAD/memory/Local-Agent` names the same
+    directory as `_bmad/memory/local-agent` while comparing unequal. Comparing the
+    existing paths by identity catches every spelling the filesystem accepts.
+    """
+    if root == sanctum or sanctum in root.parents or root in sanctum.parents:
+        return True
+    if any(_same_file(p, sanctum) for p in (root, *root.parents)):
+        return True
+    return any(_same_file(root, p) for p in sanctum.parents)
 
 
 def archive_target(filename: str, root: Path) -> str | None:
@@ -168,13 +255,25 @@ def birth_date(sanctum: Path) -> date | None:
     marker = sanctum / BORN_MARKER
     if not marker.is_file():
         return None
-    m = DATE_IN_NAME.search(marker.read_text(encoding="utf-8").strip())
+    m = DATE_IN_NAME.search(read_text(marker).strip())
     if not m:
         return None
     try:
         return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
     except ValueError:
         return None
+
+
+BORN_UNDATED_NOTE = (
+    f"{BORN_MARKER} carries no valid YYYY-MM-DD date, so the First Breath log has lost its "
+    "exemption and ages like any other log. Write the birth date into it before archiving "
+    "or pruning anything"
+)
+
+
+def born_undated(sanctum: Path) -> bool:
+    """A `.born` marker that exists but names no date the exemption can use."""
+    return (sanctum / BORN_MARKER).is_file() and birth_date(sanctum) is None
 
 
 def log_date_of(filename: str) -> date | None:
@@ -262,7 +361,7 @@ def health(sanctum: Path, today: date | None = None) -> dict:
     index_lines = 0
     fat_entries = 0
     if index.is_file():
-        text = index.read_text(encoding="utf-8")
+        text = read_text(index)
         index_lines = len(text.splitlines())
         fat_entries = sum(
             1
@@ -274,6 +373,9 @@ def health(sanctum: Path, today: date | None = None) -> dict:
     aged = stale_logs(sanctum, SESSION_RETENTION_DAYS, today)
 
     reasons = []
+    undated_birth = born_undated(sanctum)
+    if undated_birth:
+        reasons.append(BORN_UNDATED_NOTE)
     if total_tokens > WAKE_BUDGET_TOKENS:
         reasons.append(
             f"waking costs ~{total_tokens:,} tokens against a {WAKE_BUDGET_TOKENS:,} budget"
@@ -306,6 +408,7 @@ def health(sanctum: Path, today: date | None = None) -> dict:
         "index_lines": index_lines,
         "fat_index_entries": fat_entries,
         "aged_logs": aged,
+        "born_undated": undated_birth,
         "reasons": reasons,
         "curation_due": bool(reasons),
     }
