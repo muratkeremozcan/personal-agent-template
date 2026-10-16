@@ -374,6 +374,15 @@ class MessageMaskingTests(GateTestCase):
         )
         self.assert_no_withheld_names(err)
 
+    def test_concatenated_subject_in_the_filename_is_masked(self):
+        slug = "2026-05-04-personc-leaving"
+        red = self.redacted(withheld("Person C is leaving.", source=f"{slug}.md"), f"{slug}.md")
+        err = self.assert_fail(
+            self.gate(self.note(renamed(NOTE, slug), slug=slug), red),
+            "filename names a withheld subject",
+        )
+        self.assertNotIn("personc", err.lower())
+
 
 class SourceCompletenessTests(GateTestCase):
     def test_sentence_lost_from_both_files_fails(self):
@@ -576,6 +585,29 @@ class MarkerTests(GateTestCase):
                     f"in the prefix of line {line_of(text, heading)}",
                 )
 
+    def test_setext_heading_marks_its_section(self):
+        secret = "The Zephyr acquisition closes Friday."
+        headings = ("Private\n-------", "Sensitive\n=========", "Secret\n---", "Confidential\n===")
+        for heading in headings:
+            with self.subTest(heading):
+                block = f"{heading}\n\n{secret}"
+                text = before_follow_up(CLEAN_NOTE, block)
+                source = before_follow_up(CLEAN_SOURCE, block)
+                self.assert_fail(
+                    self.gate(self.note(text), source=self.source(source)),
+                    f"in the prefix of line {line_of(text, heading)}",
+                )
+
+    def test_public_setext_headings_pass(self):
+        for heading in ("Linked\n------", "Key outcomes\n============", "Next steps\n---"):
+            with self.subTest(heading):
+                block = f"{heading}\n\nLena owns the next step."
+                text = before_follow_up(NOTE, block)
+                source = before_follow_up(SOURCE, block)
+                self.assert_pass(
+                    self.gate(self.note(text), self.redacted(), source=self.source(source))
+                )
+
     def test_public_headings_pass(self):
         for heading in (
             "## Linked", "## Key outcomes", "### Decisions", "## Rollout plan, phase two",
@@ -723,7 +755,7 @@ class CredentialShapeTests(GateTestCase):
             "password", "passwd", "pwd", "passcode", "secret", "api_key", "client_secret",
             "multiword", "json password", "yaml", "env reference",
         )
-        return "password or secret assignment" if label.startswith(assignments) else label
+        return gate.CREDENTIAL_LABEL_SHAPE if label.startswith(assignments) else label
 
     def test_prose_about_credentials_is_not_a_credential(self):
         lines = (
@@ -732,6 +764,7 @@ class CredentialShapeTests(GateTestCase):
             "Password: stored in the team vault.",
             "Password: rotated on Friday, see the runbook.",
             "password: none",
+            "Password: changed on 2026-05-04",
             "Rotation: the client secret was replaced on Friday.",
             "Clone with git@github.com:acme/acme-gateway.git as usual.",
             "Docs live at https://docs.example.com/guide for reference.",
@@ -740,6 +773,59 @@ class CredentialShapeTests(GateTestCase):
             with self.subTest(line):
                 text = before_follow_up(NOTE, line)
                 self.assert_pass(self.gate(self.note(text), self.redacted()))
+
+    def test_every_value_after_a_credential_label_is_a_credential(self):
+        # Each of these archived as clean: a status word glued to a password, a quoted
+        # "none", a passphrase with a short first word, a PIN, and YAML block scalars in
+        # every legal spelling, including one holding the string "null".
+        cases = (
+            "password: reset-6B4p!8Qz",
+            '{"password": "reset-6B4p!8Qz"}',
+            'password: "none"',
+            'password: "null"',
+            "Password: my battery horse staple",
+            "PIN: 1234",
+            "**PIN:** 4821",
+            "pin = 0000",
+            "token: abc123",
+            "access_token = abcdef",
+            "API key: hunter22",
+            "password: >- # production\n  aBcdEF123456789",
+            "password: |2-\n  aBcdEF123456789",
+            "password: |-2\n  aBcdEF123456789",
+            "password: |-\n  null",
+            "password:\n  aBcdEF123456789",
+            '{"api_key": null, "password": "hunter22"}',
+            "password: none, actually hunter22",
+            "Password: rotated",
+        )
+        for line in cases:
+            with self.subTest(line):
+                text = before_follow_up(CLEAN_NOTE, line)
+                source = before_follow_up(CLEAN_SOURCE, line)
+                err = self.assert_fail(
+                    self.gate(self.note(text), source=self.source(source)),
+                    f"credential-shaped value ({gate.CREDENTIAL_LABEL_SHAPE}) on line "
+                    f"{line_of(text, line.split(chr(10))[0])}",
+                )
+                self.assertNotIn("hunter22", err)
+                self.assertNotIn("aBcdEF", err)
+
+    def test_credential_rules_apply_inside_fenced_code(self):
+        block = "```yaml\ndatabase:\n  password: >-\n    aBcdEF123456789\n  pin: 1234\n```"
+        text = before_follow_up(CLEAN_NOTE, block)
+        source = before_follow_up(CLEAN_SOURCE, block)
+        err = self.assert_fail(self.gate(self.note(text), source=self.source(source)))
+        self.assertEqual(err.count(f"({gate.CREDENTIAL_LABEL_SHAPE})"), 2)
+
+    def test_multiline_basic_auth_header_is_caught(self):
+        line = "Authorization:\n  Basic " + fake("dXNlcjpw", "YXNzd29yZA==")
+        text = before_follow_up(CLEAN_NOTE, line)
+        source = before_follow_up(CLEAN_SOURCE, line)
+        self.assert_fail(
+            self.gate(self.note(text), source=self.source(source)),
+            "credential-shaped value (basic auth header)",
+        )
 
     def test_syntax_only_values_are_not_credentials(self):
         # A typed null and a bare environment variable reference name where a secret
@@ -752,6 +838,16 @@ class CredentialShapeTests(GateTestCase):
             'password = "${DATABASE_PASSWORD}"',
             "PASSWORD=$DATABASE_PASSWORD",
             'client_secret: "${OAUTH_CLIENT_SECRET}",',
+            "api_key: null # deliberately unset",
+            "api_key: Null",
+            '{"api_key": null}',
+            '{"api_key": ""}',
+            '{"password": "${DATABASE_PASSWORD}"}',
+            "password = None",
+            "password: <your-database-password>",
+            "The CI variable is secret=${CLIENT_SECRET}.",
+            "private_key: null",
+            "The SQL fragment is WHERE password IS NULL.",
         )
         for line in lines:
             with self.subTest(line):
@@ -952,6 +1048,62 @@ class FrontmatterSweepTests(GateTestCase):
             NOTE, "redacted: true\n", "tags: [rollout, coverage]\nredacted: true\n"
         )
         self.assert_pass(self.gate(self.note(text), self.redacted()))
+
+
+class FrontmatterSchemaTests(GateTestCase):
+    """Archive notes carry only the keys references/archive.md lists, each in a fixed
+    shape. Anything the gate does not read in full is refused."""
+
+    def test_unsupported_syntax_and_keys_fail(self):
+        secret = "The Zephyr acquisition closes Friday."
+        cases = {
+            "flow mapping private": f"metadata: {{public: ok, private: {secret}}}\n",
+            "flow mapping secret": f"metadata: {{public: ok, secret: {secret}}}\n",
+            "flow mapping confidential": f"metadata: {{public: ok, confidential: {secret}}}\n",
+            "nested mapping": f"metadata:\n  private: {secret}\n",
+            "block scalar": f"private: >-\n  {secret}\n",
+            "unknown key": f"summary: {secret}\n",
+            "comment": "# reviewed by Lena\n",
+            "anchor": "themes: &t [\"[[theme/test-coverage]]\"]\n",
+            "alias": "repos: *t\n",
+            "tag": "redacted_count: !!str 0\n",
+            "quoted key": f'"summary": "{secret}"\n',
+            "trailing comment": "type: session-log # archived\n",
+            "capitalised boolean": "source_withheld: True\n",
+            "people outside the link shape": "people: [Priya]\n",
+            "duplicate key": "type: session-log\n",
+            "indented list item": "tags:\n    - rollout\n",
+        }
+        for label, field in cases.items():
+            with self.subTest(label):
+                text = replace_once(CLEAN_NOTE, "redacted: false\n", "redacted: false\n" + field)
+                source = before_follow_up(CLEAN_SOURCE, f"**Private:** {secret}")
+                err = self.assert_fail(
+                    self.gate(self.note(text), source=self.source(source)), "frontmatter"
+                )
+                self.assertRegex(
+                    err, r"unsupported frontmatter (?:syntax|key)|appears twice"
+                )
+
+    def test_documented_shapes_pass(self):
+        cases = {
+            "block lists": (
+                '"[[person/Lena]]"]',
+                '"[[person/Lena]]"]\ntags:\n  - rollout\n  - coverage',
+            ),
+            "block list of people": (
+                'people: ["[[person/Lena]]"]', 'people:\n  - "[[person/Lena]]"'
+            ),
+            "empty list": ('repos: ["[[repo/acme-gateway]]"]', "repos: []"),
+            "flow list of sources": (
+                f"source: sessions/{SLUG}.md",
+                f"source: [sessions/{SLUG}.md, sessions/2026-05-04-other-log.md]",
+            ),
+        }
+        for label, (old, new) in cases.items():
+            with self.subTest(label):
+                text = replace_once(NOTE, old, new)
+                self.assert_pass(self.gate(self.note(text), self.redacted()))
 
 
 class StructureTests(GateTestCase):

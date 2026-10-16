@@ -169,34 +169,51 @@ QUOTE_MARK = re.compile(r"""(?<![^\W_])'|'(?![^\W_])|["]""")
 
 DASHES = re.compile("[-\u2010-\u2015\u2212\ufe58\ufe63\uff0d]")
 
-# Labelled secret assignments, in prose, env, YAML and JSON spelling. Any value of four or
-# more characters counts, a multiword passphrase included, with two narrow exceptions.
-# A value that is only syntax holds no secret: a YAML typed null (`api_key: null`) or a
-# bare environment variable reference (`password = "${DATABASE_PASSWORD}"`). A quoted
-# "null" is a string and still counts. After `:` a value opening with a status word is a
-# note about the credential: "Password: reset by IT on Friday".
-_SECRET_LABEL = (
-    r"(?:\b|(?<=_))"
-    r"(?:password|passwd|pwd|passcode|secret(?:[_-]?key)?|api[_-]?key|client[_-]?secret)\b"
-    r"""[*_"'`]*\s*"""
+# Labelled credentials: a credential label, then `:` or `=`, then a value, in prose, env,
+# YAML or JSON spelling, quoted or not, any case. The label may carry a snake_case or
+# kebab-case prefix (`DB_PASSWORD`, `client-secret`, `github_token`). Every value after a
+# label is a credential except the narrow cases classify_credential_value() lists. Each
+# exception is judged on the value token itself, so trailing `}`, `,`, `;` or a
+# `# comment` cannot change the result.
+CREDENTIAL_LABEL = re.compile(
+    r"""(?<![A-Za-z0-9])(?P<quote>["'`]?)(?:[A-Za-z0-9]+[_-])*?"""
+    r"""(?:password|passwd|pwd|passcode|pin|secret(?:[_-]?key)?|api[_ -]?key|apikey"""
+    r"""|token|client[_ -]?secret)"""
+    r"""(?P=quote)[*_]*[ \t]*[:=](?!=)""",
+    re.IGNORECASE,
 )
-_SYNTAX_ONLY = r"""(?:(?:null|~)|["'`]?\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)["'`]?)[,;]?\s*$"""
-CREDENTIAL_STATUS_WORDS = (
-    "reset", "rotated", "changed", "updated", "expired", "expires", "revoked", "removed",
-    "stored", "saved", "kept", "managed", "shared", "required", "needed", "missing",
-    "unknown", "pending", "tbd", "none", "n/a", "see", "in", "via", "from", "at", "on",
-    "ask", "check", "use", "is", "was", "are", "were", "will", "has", "had", "needs",
-    "must", "should", "not", "no",
+CREDENTIAL_LABEL_SHAPE = "credential assignment"
+
+# Values that are syntax and hold no secret: a bare null, and a pure variable reference
+# or placeholder such as `${DATABASE_PASSWORD}`, `$DATABASE_PASSWORD` or `<your-api-key>`.
+NULL_VALUE = re.compile(r"null|none|~", re.IGNORECASE)
+PLACEHOLDER_VALUE = re.compile(r"\$\{[A-Za-z_]\w*\}|\$[A-Za-z_]\w*|<[A-Za-z][\w .-]*>")
+
+# The one prose shape that describes a credential without holding it: a past participle
+# of an operational verb, then a preposition, then the rest of the sentence.
+# "Password: reset by IT on Friday", "Password: stored in the team vault".
+CREDENTIAL_STATUS_VERBS = (
+    "reset", "rotated", "changed", "updated", "revoked", "expired", "removed", "stored",
+    "saved", "kept", "moved", "issued", "regenerated",
 )  # fmt: skip
-_STATUS = r"(?:" + "|".join(re.escape(w) for w in CREDENTIAL_STATUS_WORDS) + r")\b"
-_SECRET_VALUE = (
-    rf"""(?:=\s*(?!{_SYNTAX_ONLY})["'`]?[^\s"'`]{{4,}}"""
-    rf"""|:[*_\s]*(?!{_SYNTAX_ONLY})(?!["'`]?{_STATUS})["'`]?[^\s"'`]{{4,}})"""
+CREDENTIAL_STATUS_PREPOSITIONS = (
+    "by", "on", "in", "at", "via", "from", "to", "after", "before", "during", "with",
+    "for", "since", "until",
+)  # fmt: skip
+STATUS_SENTENCE = re.compile(
+    r"(?:" + "|".join(CREDENTIAL_STATUS_VERBS) + r") +(?:"
+    + "|".join(CREDENTIAL_STATUS_PREPOSITIONS) + r") +\S",
+    re.IGNORECASE,
 )
 
-# A YAML block scalar indicator at the end of a line: the value sits on the indented lines
-# that follow, so a per-line scan sees the label and the secret apart.
-BLOCK_SCALAR = re.compile(r":[ \t]*[|>][-+]?\d*[ \t]*$")
+# A YAML block scalar indicator in either legal order, with an optional comment.
+BLOCK_INDICATOR = re.compile(r"[|>](?:[-+]?[1-9]?|[1-9][-+])(?:[ \t]+#.*)?[ \t]*$")
+
+# A line whose value continues on the indented lines below it: a bare `key:` or a block
+# scalar indicator.
+CONTINUED = re.compile(
+    r":[ \t]*(?:[|>](?:[-+]?[1-9]?|[1-9][-+]))?[ \t]*(?:#.*)?$"
+)
 
 # Shapes the fail-closed rule withholds under `security` with no further analysis. The
 # failure message names the shape and the line number only, never the value.
@@ -235,10 +252,6 @@ CREDENTIAL_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "url with embedded password",
         re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@", re.IGNORECASE),
-    ),
-    (
-        "password or secret assignment",
-        re.compile(_SECRET_LABEL + _SECRET_VALUE, re.IGNORECASE | re.MULTILINE),
     ),
     (
         "oauth token or credentials file path",
@@ -301,6 +314,7 @@ FM_LIST_ITEM = re.compile(r"^\s+-\s+(.*)$")
 LINE_LEAD = re.compile(r"^[\s>]*(?:(?:[-*+]|\d+[.)])\s+)?(?:#{1,6}\s+)?")
 BOLD_SPAN = re.compile(r"^(?:\*\*|__)(.+?)(?:\*\*|__)")
 HEADING = re.compile(r"^[ \t>]*#{1,6}[ \t]+(.+?)[ \t#]*$")
+SETEXT_UNDERLINE = re.compile(r"[ ]{0,3}(?:=+|-+)[ \t]*")
 
 # Characters that hide a leak from a byte comparison while leaving it readable: zero-width
 # joiners and spaces, word joiner, soft hyphen, and the byte-order mark.
@@ -724,17 +738,117 @@ class Archive:
     def hide(self, text: str) -> str:
         """Text as a failure message may print it: credential shapes masked, and every
         token from the withheld text replaced by a placeholder. A report that names the
-        person a block was withheld about is a second copy of the secret."""
-        hidden = self.withheld_idents | self.withheld_entities
+        person a block was withheld about is a second copy of the secret. A token that
+        carries a withheld entity of four or more characters is masked too, so the
+        concatenated `personc` in `personc-leaving` does not print the name."""
+        hidden = (self.withheld_idents | self.withheld_entities) - PATH_WORDS
+        embedded = [e for e in self.withheld_entities - PATH_WORDS if len(e) >= 4]
 
         def replace(match: re.Match[str]) -> str:
             token = normalize(match.group(0))
-            return WITHHELD_PLACEHOLDER if token in hidden - PATH_WORDS else match.group(0)
+            if token in hidden or any(e in token for e in embedded):
+                return WITHHELD_PLACEHOLDER
+            return match.group(0)
 
         return re.sub(r"[^\W_]+", replace, mask(text, generic=False).translate(INVISIBLE))
 
 
 # Each check appends to archive.failures and returns nothing.
+
+
+# The frontmatter schema references/archive.md prescribes. The archive procedure writes
+# these keys and nothing else, so the gate refuses any other key and any YAML syntax it
+# does not read in full: flow mappings, nested mappings, block scalars, anchors, aliases,
+# tags, comments and multi-document markers. A gate that half-parses YAML passes whatever
+# its parser skipped. Each value is a one-line plain scalar, a flow list of plain or
+# double-quoted scalars, or a block list of the same.
+SCHEMA_ITEMS = {
+    "source": re.compile(r'"?sessions/[^\s"#,\[\]{}]+\.md"?'),
+    "source_path": re.compile(r'"?sessions/[^\s"#,\[\]{}]+\.md"?'),
+    "people": re.compile(r'"\[\[person/[^"\[\]\n]+\]\]"'),
+    "themes": re.compile(r'"\[\[theme/[^"\[\]\n]+\]\]"'),
+    "repos": re.compile(r'"\[\[repo/[^"\[\]\n]+\]\]"'),
+    "tags": re.compile(r"[A-Za-z0-9_/-]+"),
+}
+SCHEMA_SCALARS = {
+    "type": re.compile(r"session-log"),
+    "date": re.compile(r"\d{4}-\d{2}-\d{2}"),
+    "redacted": re.compile(r"true|false"),
+    "redacted_count": re.compile(r"\d+"),
+    "source_withheld": re.compile(r"true"),
+}
+SCHEMA_SCALAR_LISTS = frozenset({"source", "source_path"})
+SCHEMA_KEY_LINE = re.compile(r"(?P<k>[a-z_]+):(?:[ ](?P<v>.*\S))?[ \t]*")
+SCHEMA_ITEM_LINE = re.compile(r"[ ]{2}- (?P<v>.*\S)[ \t]*")
+
+
+FLOW_ITEM = r'"[^"\n]*"|[^\s,"\[\]{}][^,"\[\]{}]*'
+FLOW_LIST = re.compile(rf"\[\s*(?:(?:{FLOW_ITEM})(?:,\s*(?:{FLOW_ITEM}))*)?\s*\]")
+
+
+def flow_items(value: str) -> list[str] | None:
+    """The items of a one-line flow list of plain or double-quoted scalars, or None when
+    the value is not one."""
+    if not FLOW_LIST.fullmatch(value):
+        return None
+    return [m.group(0).strip() for m in re.finditer(FLOW_ITEM, value[1:-1])]
+
+
+def check_frontmatter_schema(a: Archive) -> None:
+    """Every frontmatter line must be a key from the schema with a value of its shape."""
+    seen: set[str] = set()
+    current: str | None = None
+    for i, line in enumerate(a.fm_lines):
+        line_no = i + 2
+        if not line.strip():
+            current = None
+            continue
+        item = SCHEMA_ITEM_LINE.fullmatch(line)
+        if item and current is not None:
+            if not SCHEMA_ITEMS[current].fullmatch(item.group("v")):
+                a.fail(
+                    f"unsupported frontmatter syntax on line {line_no}: a `{current}` list "
+                    "item must have the shape references/archive.md prescribes"
+                )
+            continue
+        current = None
+        key_line = SCHEMA_KEY_LINE.fullmatch(line)
+        if not key_line:
+            a.fail(
+                f"unsupported frontmatter syntax on line {line_no}: archive notes carry "
+                "only `key: value` lines and simple lists (no nested or flow mappings, "
+                "block scalars, anchors, tags, comments or quoted keys)"
+            )
+            continue
+        key, value = key_line.group("k"), key_line.group("v")
+        if key not in SCHEMA_SCALARS and key not in SCHEMA_ITEMS:
+            a.fail(
+                f"unsupported frontmatter key {a.hide(key)!r} on line {line_no}; the "
+                "schema in references/archive.md lists every key an archive note may carry"
+            )
+            continue
+        if key in seen:
+            a.fail(f"frontmatter key {key!r} appears twice (line {line_no})")
+        seen.add(key)
+        if value is None:
+            if key in SCHEMA_ITEMS:
+                current = key
+            else:
+                a.fail(f"unsupported frontmatter syntax on line {line_no}: `{key}` has no value")
+            continue
+        if key in SCHEMA_SCALARS:
+            ok = SCHEMA_SCALARS[key].fullmatch(value) is not None
+        else:
+            items = flow_items(value)
+            pattern = SCHEMA_ITEMS[key]
+            ok = (items is not None and all(pattern.fullmatch(v) for v in items)) or (
+                key in SCHEMA_SCALAR_LISTS and pattern.fullmatch(value) is not None
+            )
+        if not ok:
+            a.fail(
+                f"unsupported frontmatter syntax on line {line_no}: the `{key}` value does "
+                "not have the shape references/archive.md prescribes"
+            )
 
 
 def check_structure(a: Archive) -> None:
@@ -1044,6 +1158,16 @@ def check_markers(a: Archive) -> None:
     body_start = len(a.fm_lines) + 3
     body_lines = strip_notices(a.body).split("\n")
     body = [(body_start + i, line) for i, line in enumerate(body_lines)]
+    # A Setext heading is the paragraph above an `===` or `---` underline. Its text is a
+    # prefix label exactly like a `#` heading, so `Private` over `-------` marks the
+    # section beneath it.
+    for i, line in enumerate(body_lines):
+        if i and SETEXT_UNDERLINE.fullmatch(line) and body_lines[i - 1].strip():
+            start = i - 1
+            while start > 0 and body_lines[start - 1].strip():
+                start -= 1
+            heading = " ".join(t.strip() for t in body_lines[start:i])
+            body.append((body_start + start, f"# {heading}"))
 
     prefix_reported: set[tuple[int, str]] = set()
     for line_no, text in fm_raw + fm_values + body:
@@ -1075,28 +1199,80 @@ def check_markers(a: Archive) -> None:
                 )
 
 
+def continuation(lines: list[str], i: int) -> str:
+    """The indented lines below a `key:` or block scalar line, joined by spaces."""
+    if not CONTINUED.search(lines[i]):
+        return ""
+    indent = len(lines[i]) - len(lines[i].lstrip())
+    value = []
+    for follow in lines[i + 1 :]:
+        if follow.strip() and len(follow) - len(follow.lstrip()) <= indent:
+            break
+        value.append(follow.strip())
+    return " ".join(v for v in value if v)
+
+
+def classify_credential_value(rest: str, structured: bool, continued: str) -> bool:
+    """Whether the text after a credential label holds a credential. `structured` is true
+    for a quoted (JSON-style) label, where a value ends at `,`, `}` or `]`.
+
+    The exceptions: an empty value, an exact bare null (`null`, `None`, `~`), a pure
+    variable reference or placeholder, and, for an unquoted prose or YAML value, the
+    one status sentence shape. A quoted value is a string, so `"null"` and `"none"` are
+    credentials. A block scalar indicator is a credential, because a block scalar is a
+    string whatever it holds.
+    """
+    rest = rest.lstrip(" \t*_")
+    if not rest.strip():
+        return bool(continued) and classify_credential_value(continued, False, "")
+    if rest[0] in "\"'`":
+        close = rest.find(rest[0], 1)
+        content = rest[1:close] if close > 0 else rest[1:]
+        return not (content == "" or PLACEHOLDER_VALUE.fullmatch(content))
+    if BLOCK_INDICATOR.match(rest):
+        return True
+    if structured:
+        token = re.split(r"[,}\]]", rest, maxsplit=1)[0].strip()
+        tail = rest[len(re.split(r"[,}\]]", rest, maxsplit=1)[0]) :]
+        exempt = NULL_VALUE.fullmatch(token) or PLACEHOLDER_VALUE.fullmatch(token)
+        return not (exempt and re.fullmatch(r"\s*(?:[,}\]].*)?", tail))
+    value = re.sub(r"[ \t]+#.*$", "", rest).strip()
+    token = value.rstrip(".;,").strip()
+    if token == "" or NULL_VALUE.fullmatch(token) or PLACEHOLDER_VALUE.fullmatch(token):
+        return False
+    return not STATUS_SENTENCE.match(value)
+
+
+def labelled_credential(line: str, continued: str) -> bool:
+    """Whether any credential label on the line carries a credential value."""
+    return any(
+        classify_credential_value(
+            line[m.end() :], bool(m.group("quote")) or "{" in line[: m.start()], continued
+        )
+        for m in CREDENTIAL_LABEL.finditer(line)
+    )
+
+
 def check_credentials(a: Archive) -> None:
-    """Credential shapes anywhere in the note, frontmatter included. The failure names
-    the shape and the line, never the value. A YAML block scalar (`password: >-` with the
-    value indented below) is read as one line, label and value together."""
+    """Credential shapes anywhere in the note, frontmatter and fenced code included. The
+    failure names the shape and the line, never the value. A value continued on the
+    indented lines below its label, a YAML block scalar among them, is read together with
+    the label."""
     lines = a.note_raw.split("\n")
     for i, line in enumerate(lines):
-        candidate = line
-        if BLOCK_SCALAR.search(line):
-            indent = len(line) - len(line.lstrip())
-            value = []
-            for follow in lines[i + 1 :]:
-                if follow.strip() and len(follow) - len(follow.lstrip()) <= indent:
-                    break
-                value.append(follow.strip())
-            candidate = BLOCK_SCALAR.sub(": ", line) + " ".join(v for v in value if v)
-        line_no = i + 1
-        for shape, pattern in CREDENTIAL_SHAPES:
-            if pattern.search(candidate):
-                a.fail(
-                    f"credential-shaped value ({shape}) on line {line_no}; withhold under "
-                    "`security`"
-                )
+        continued = continuation(lines, i)
+        views = [line, CONTINUED.sub(": ", line) + " " + continued] if continued else [line]
+        found = [
+            shape for shape, pattern in CREDENTIAL_SHAPES
+            if any(pattern.search(view) for view in views)
+        ]
+        if labelled_credential(line, continued):
+            found.append(CREDENTIAL_LABEL_SHAPE)
+        for shape in found:
+            a.fail(
+                f"credential-shaped value ({shape}) on line {i + 1}; withhold under "
+                "`security`"
+            )
 
 
 def check_source(a: Archive) -> None:
@@ -1145,6 +1321,7 @@ def check_source(a: Archive) -> None:
 
 
 def run(a: Archive, no_withheld: bool) -> list[str]:
+    check_frontmatter_schema(a)
     check_structure(a)
     if no_withheld:
         check_clean_claim(a)

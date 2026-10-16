@@ -116,6 +116,29 @@ would have announced who the withheld block was about while the body showed noth
 slug is later renamed. The three link lists are quoted wikilinks, which is the form Obsidian and compatible readers
 require for internal links inside list properties.
 
+### The frontmatter schema
+
+The frontmatter carries these keys and nothing else, one per line, each value in the shape shown.
+The verifier refuses any other key and any YAML it does not read in full, with an "unsupported frontmatter syntax" or "unsupported frontmatter key" failure.
+A gate that half-parses YAML passes whatever its parser skipped, so the schema is closed on purpose.
+
+| key | value |
+|---|---|
+| `type` | `session-log` |
+| `date` | `YYYY-MM-DD` |
+| `source` | `sessions/<name>.md`, or a list of them for a merged note |
+| `source_withheld` | `true`, in place of `source` |
+| `people` | a list of `"[[person/<Name>]]"` |
+| `themes` | a list of `"[[theme/<slug>]]"` |
+| `repos` | a list of `"[[repo/<name>]]"` |
+| `tags` | a list of plain tags (letters, digits, `_`, `-`, `/`) |
+| `redacted` | `true` or `false` |
+| `redacted_count` | a non-negative integer |
+
+A list is a one-line flow list (`["[[person/Example]]", "[[person/Other]]"]`) or a block list with each item on its own line indented two spaces (`  - "[[person/Example]]"`).
+Values are plain or double-quoted scalars on one line.
+Flow mappings, nested mappings, block scalars, anchors, aliases, tags such as `!!str`, comments, quoted keys and duplicate keys are all refused.
+
 Fill the link lists from the deployment's shared taxonomy file if it has one. This template ships
 no such file, because what counts as a person, a theme or a repository is deployment-specific.
 Without one, derive the lists from the entity notes that already exist in the archive and from the
@@ -258,9 +281,9 @@ lines. These are examples of a shape; match the intent.
 The verifier treats every token in the list above as a marker wherever it sits in a sentence, plus "told" or "said" followed within three words by "privately" ("told me privately", "told Dana privately", "said privately").
 Bare `private`, `sensitive` and `secret` count only in the prefix, because ordinary prose uses them ("the private repo", "sensitive data", "rotated the client secret").
 Inside a snake_case identifier they mark nothing, so `client_secret:` and `private_key_path:` are configuration keys.
-A heading is its own prefix, so `## Private` marks the section beneath it.
+A heading is its own prefix, so `## Private` marks the section beneath it, and so does a Setext heading (`Private` over a line of `-` or `=`).
 Markers inside HTML comments and code fences count too, since they sync with the file whether or not they render.
-So do markers in frontmatter: a `summary:` that opens "Confidential, do not share:" fails exactly like the same line in the body, and a key is the prefix of its value, so `confidential:`, `"private":` and a nested `sensitive:` fail too.
+So do markers in frontmatter: a value that opens "Confidential, do not share:" fails exactly like the same line in the body, and a key is the prefix of its value, so `confidential:` and `"private":` fail as markers on top of failing the schema.
 A note that uses a marker phrase in ordinary prose fails the check; reword the line or withhold it.
 
 **What gets withheld is the whole block**, defined by where the marker sits:
@@ -351,6 +374,7 @@ the copy that syncs off the machine.
 The gate matches text.
 It catches a withheld sentence reproduced (with or without its label, and through changes to punctuation, case, emphasis, diacritics, look-alike letters and invisible characters), a long word run that survived light rewording, and a credential-shaped value.
 It catches a confidentiality marker left in the note body or in a frontmatter value.
+It refuses frontmatter outside the schema above.
 It catches a word from the withheld text reaching the frontmatter (every key, `tags` included; `type`, `date`, `redacted`, `redacted_count` and `source_withheld` are exempt only while they hold exactly `session-log`, an ISO date, `true` or `false`, or a count), the filename, `source`, a notice path, an `Archived from` heading, or a `sessions/` path in the prose.
 It catches a source sentence that reached neither the note nor the redacted file.
 It matches text only and has no model of meaning.
@@ -392,11 +416,15 @@ the owner what happened.
   useful and recording the credential alongside it is the path of least resistance. Assume the
   material is present and spend one rule on it.
   The verifier fails a note carrying a known credential shape and names the shape and line without printing the value.
-  The shapes: Slack tokens and webhooks; GitHub, GitLab, npm and PyPI tokens; OpenAI, Anthropic, Stripe and Google API keys; AWS access key IDs (`AKIA` and `ASIA`) and secret access keys; JWTs; private key blocks; bearer tokens and `Authorization: Basic` headers; cookie headers; URLs carrying a password (`postgres://user:password@host`); labelled `password`, `passwd`, `pwd`, `passcode`, `secret`, `api_key` and `client_secret` assignments; and token and credential file paths.
-  Labels and header names match in prose, env, JSON and YAML spelling, quoted or not, and a YAML block scalar (`password: >-` with the value on the next line) is read with its label.
-  Any labelled value counts, a multiword passphrase included.
-  Two narrow exceptions keep accurate configuration excerpts archivable: a value that is only a YAML null (`api_key: null`) or only an environment variable reference (`password = "${DATABASE_PASSWORD}"`), and a value after `:` that opens with a status word ("Password: reset by IT on Friday", `CREDENTIAL_STATUS_WORDS` in the script).
-  A quoted `"null"` and a reference with a default (`${DATABASE_PASSWORD:-hunter2}`) still count.
+  The shapes: Slack tokens and webhooks; GitHub, GitLab, npm and PyPI tokens; OpenAI, Anthropic, Stripe and Google API keys; AWS access key IDs (`AKIA` and `ASIA`) and secret access keys; JWTs; private key blocks; bearer tokens and `Authorization: Basic` headers; cookie headers; URLs carrying a password (`postgres://user:password@host`); labelled credentials; and token and credential file paths.
+  A labelled credential is any value after a `password`, `passwd`, `pwd`, `passcode`, `pin`, `secret`, `api key`, `token` or `client secret` label followed by `:` or `=`, in prose, env, JSON or YAML spelling, quoted or not, in any case, with or without a prefix such as `DB_` or `client_`.
+  The same rules apply on every line, inside fenced code blocks included.
+  A value continued on the indented lines below its label is read with the label, and a YAML block scalar indicator after a label (`password: >-`, `password: |2-`) is itself a credential, because a block scalar is a string whatever it holds.
+  Three exceptions keep accurate notes and configuration excerpts archivable, each judged on the value token itself so trailing `}`, `,`, `;` or a `# comment` changes nothing:
+  an empty value or an exact bare `null`, `None` or `~`;
+  a pure variable reference or placeholder (`${DATABASE_PASSWORD}`, `$DATABASE_PASSWORD`, `<your-api-key>`);
+  and, for an unquoted value, one status sentence shape: an operational past participle, then a preposition, then the rest ("Password: reset by IT on Friday", "Password: stored in the team vault"; `CREDENTIAL_STATUS_VERBS` and `CREDENTIAL_STATUS_PREPOSITIONS` in the script).
+  A quoted value is a string, so `"null"`, `"none"` and `"reset by IT"` count, and so does a reference with a default (`${DATABASE_PASSWORD:-hunter2}`).
 - **Nothing is deleted before it is shown.** Report the withheld list to the owner, by file and category,
   before any sanctum log is pruned. They are the only one who can tell you a withheld block was fine
   or a passed block was not.

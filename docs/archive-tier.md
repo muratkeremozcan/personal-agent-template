@@ -72,7 +72,7 @@ it decides, and `scripts/verify_archive_redaction.py` makes the outcome checkabl
 asserted.
 It re-reads the archived note, the redacted file and the source log off disk.
 It fails on a surviving sentence, on a seven-word run that survived paraphrase, and on a word from the withheld text in the frontmatter, the filename, `source`, a notice path or an `Archived from` heading.
-It fails on a confidentiality marker or credential shape left in the note, on a source sentence that reached neither file, and on a missing withheld notice.
+It fails on a confidentiality marker or credential left in the note, on frontmatter outside the closed schema `references/archive.md` lists, on a source sentence that reached neither file, and on a missing withheld notice.
 It exits 2 when it cannot run at all, including when `--source` is missing, which blocks the prune exactly as a failure does.
 
 Three rules that are easy to get wrong and were, in a real deployment:
