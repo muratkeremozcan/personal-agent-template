@@ -338,8 +338,13 @@ uv run ~/local-agent/skills/local-agent/scripts/install_global.py
 
 It creates relative symlinks in `~/.claude/skills`, `~/.agents/skills`,
 `~/.codex/skills`, and `~/.gemini/config/skills`, plus any companion skills under
-`skills/` and subagents under `agents/`. It refuses to replace a real file or
-directory, and a second run changes nothing.
+`skills/` and subagents under `agents/`. Every destination is checked before
+the first link is written: a real file or directory, a file where a folder is
+needed, an unwritable folder, or a link into another checkout refuses the whole
+install with exit status 2 and changes nothing. Links whose target was deleted
+are repointed and reported with their old target. `--force` repoints links into
+another checkout, `--dry-run` prints the plan and touches nothing, and a second
+run changes nothing.
 
 Confirm that each selected tool can discover `local-agent` before continuing.
 The [custom-module installation guide](https://docs.bmad-method.org/how-to/install-custom-modules/)

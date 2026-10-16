@@ -172,7 +172,9 @@ To skip the installer, link the checkout straight into every AI tool's user-leve
 uv run skills/local-agent/scripts/install_global.py
 ```
 
-It only creates relative symlinks and refuses to replace a real directory, so an installer-managed copy is never overwritten.
+It only creates relative symlinks and checks every destination before writing the first one.
+A real file or directory, a file where a folder is needed, or a link into another checkout refuses the whole install with exit status 2 and leaves everything as it was.
+Pass `--force` to repoint links that belong to another checkout, and `--dry-run` to see what would change without touching anything.
 
 Restart or reload your AI tool if the skill does not appear immediately.
 
