@@ -55,6 +55,30 @@ def statuses(changes) -> list[tuple[Path, str]]:
     return [(change.destination, change.status) for change in changes]
 
 
+@contextlib.contextmanager
+def fail_new_link_then_race_restore(destination: Path):
+    """Fail the new link at destination, then create a real file there just before rollback
+    recreates the old link."""
+    original_symlink_to = Path.symlink_to
+    original_symlink = os.symlink
+
+    def failing_symlink_to(path, target, target_is_directory=False):
+        if path == destination:
+            raise OSError(5, "simulated failure")
+        return original_symlink_to(path, target, target_is_directory)
+
+    def racing_symlink(target, path, *args, **kwargs):
+        if Path(path) == destination:
+            destination.write_text("created concurrently", encoding="utf-8")
+        return original_symlink(target, path, *args, **kwargs)
+
+    with (
+        mock.patch.object(Path, "symlink_to", failing_symlink_to),
+        mock.patch.object(os, "symlink", racing_symlink),
+    ):
+        yield
+
+
 class HomeTestCase(unittest.TestCase):
     """A scratch home directory holding an agent repository at ~/agent-repo."""
 
@@ -496,6 +520,263 @@ class ApplyTransactionTests(HomeTestCase):
         self.assertEqual(links_under(self.home), [])
         self.assertEqual(sorted(p.name for p in self.home.iterdir()), ["agent-repo"])
 
+    def test_restore_keeps_a_file_created_just_before_the_restore(self):
+        destination = self.link(".claude/skills/local-agent", "/nonexistent/old")
+        backup = destination.with_name("backup")
+        destination.rename(backup)
+        original_symlink = os.symlink
+
+        def racing_symlink(target, path, *args, **kwargs):
+            if Path(path) == destination:
+                destination.write_text("created concurrently", encoding="utf-8")
+            return original_symlink(target, path, *args, **kwargs)
+
+        with (
+            mock.patch.object(os, "symlink", racing_symlink),
+            self.assertRaises(FileExistsError),
+        ):
+            install_global._restore(backup, destination)
+
+        self.assertEqual(destination.read_text(encoding="utf-8"), "created concurrently")
+        self.assertEqual(os.readlink(backup), "/nonexistent/old")
+
+    def test_restore_moves_a_directory_back_only_onto_a_free_name(self):
+        backup = self.home / "backup"
+        backup.mkdir()
+        (backup / "keep").write_text("set aside", encoding="utf-8")
+        occupied = self.home / "occupied"
+        occupied.write_text("someone else's", encoding="utf-8")
+
+        with self.assertRaises(FileExistsError):
+            install_global._restore(backup, occupied)
+        self.assertEqual(occupied.read_text(encoding="utf-8"), "someone else's")
+
+        free = self.home / "free"
+        install_global._restore(backup, free)
+        self.assertEqual((free / "keep").read_text(encoding="utf-8"), "set aside")
+        self.assertFalse(os.path.lexists(backup))
+
+    def test_rollback_reports_a_restore_blocked_by_a_concurrent_file(self):
+        destination = self.link(".codex/skills/local-agent", "/nonexistent/old")
+        changes = install_global.plan(self.source, self.home)
+
+        with (
+            fail_new_link_then_race_restore(destination),
+            self.assertRaises(install_global.InstallIncomplete) as failure,
+        ):
+            install_global.apply(changes)
+
+        self.assertEqual(str(failure.exception.error), "[Errno 5] simulated failure")
+        [leftover] = failure.exception.leftovers
+        [backup] = self.home.rglob("*install-backup*")
+        self.assertEqual(
+            leftover,
+            f"{destination}: now occupied by something else; previous entry kept at {backup}",
+        )
+        self.assertEqual(destination.read_text(encoding="utf-8"), "created concurrently")
+        self.assertEqual(os.readlink(backup), "/nonexistent/old")
+        self.assertFalse(os.path.lexists(self.home / ".claude"))
+
+    @unittest.skipIf(os.geteuid() == 0, "root can write a read-only directory")
+    def test_rollback_recovers_every_entry_after_a_permission_failure(self):
+        first = self.link(".claude/skills/local-agent", "/nonexistent/old")
+        second = self.link(".codex/skills/local-agent", "/nonexistent/old2")
+        changes = install_global.plan(self.source, self.home)
+        original_symlink_to = Path.symlink_to
+
+        def revoke_write(path, target, target_is_directory=False):
+            if path == second:
+                second.parent.chmod(0o500)
+            return original_symlink_to(path, target, target_is_directory)
+
+        self.addCleanup(second.parent.chmod, 0o700)
+        with (
+            mock.patch.object(Path, "symlink_to", revoke_write),
+            self.assertRaises(install_global.InstallIncomplete) as failure,
+        ):
+            install_global.apply(changes)
+
+        self.assertIsInstance(failure.exception.error, PermissionError)
+        self.assertTrue(str(failure.exception).startswith(str(failure.exception.error)))
+        [leftover] = failure.exception.leftovers
+        [backup] = second.parent.glob("*install-backup*")
+        self.assertTrue(leftover.startswith(f"{second}: could not restore"))
+        self.assertTrue(leftover.endswith(f"; previous entry kept at {backup}"))
+        self.assertEqual(os.readlink(backup), "/nonexistent/old2")
+        self.assertEqual(os.readlink(first), "/nonexistent/old")
+        self.assertFalse(os.path.lexists(self.home / ".agents"))
+        self.assertEqual(list(first.parent.glob("*install-backup*")), [])
+
+    def test_rollback_reports_a_restored_link_whose_backup_remains(self):
+        destination = self.link(".codex/skills/local-agent", "/nonexistent/old")
+        changes = install_global.plan(self.source, self.home)
+        original_symlink_to = Path.symlink_to
+        original_unlink = Path.unlink
+
+        def failing_symlink_to(path, target, target_is_directory=False):
+            if path == destination:
+                raise OSError(5, "simulated failure")
+            return original_symlink_to(path, target, target_is_directory)
+
+        def stuck_backup(path, *args, **kwargs):
+            if "install-backup" in path.name:
+                raise PermissionError(13, "simulated cleanup failure")
+            return original_unlink(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(Path, "symlink_to", failing_symlink_to),
+            mock.patch.object(Path, "unlink", stuck_backup),
+            self.assertRaises(install_global.InstallIncomplete) as failure,
+        ):
+            install_global.apply(changes)
+
+        [backup] = destination.parent.glob("*install-backup*")
+        self.assertEqual(
+            failure.exception.leftovers,
+            [
+                (
+                    f"{backup}: {destination} was restored, but this backup remains"
+                    " ([Errno 13] simulated cleanup failure)"
+                ),
+            ],
+        )
+        self.assertEqual(os.readlink(destination), "/nonexistent/old")
+
+    def test_rollback_continues_past_an_entry_it_cannot_remove(self):
+        old = self.link(".claude/skills/local-agent", "/nonexistent/old")
+        changes = install_global.plan(self.source, self.home)
+        agents = self.home / ".agents/skills/local-agent"
+        original_unlink = Path.unlink
+        original_symlink_to = Path.symlink_to
+
+        def stuck_unlink(path, *args, **kwargs):
+            if path == agents:
+                raise PermissionError(13, "simulated unlink failure")
+            return original_unlink(path, *args, **kwargs)
+
+        def failing_symlink_to(path, target, target_is_directory=False):
+            if path == self.home / ".gemini/config/skills/local-agent":
+                raise OSError(5, "simulated failure")
+            return original_symlink_to(path, target, target_is_directory)
+
+        with (
+            mock.patch.object(Path, "unlink", stuck_unlink),
+            mock.patch.object(Path, "symlink_to", failing_symlink_to),
+            self.assertRaises(install_global.InstallIncomplete) as failure,
+        ):
+            install_global.apply(changes)
+
+        self.assertEqual(str(failure.exception.error), "[Errno 5] simulated failure")
+        self.assertEqual(
+            failure.exception.leftovers,
+            [f"{agents}: could not remove the new link ([Errno 13] simulated unlink failure)"],
+        )
+        self.assertEqual(os.readlink(old), "/nonexistent/old")
+        self.assertFalse(os.path.lexists(self.home / ".codex"))
+        self.assertFalse(os.path.lexists(self.home / ".gemini"))
+        self.assert_no_backups()
+
+    def test_refuses_when_an_aliased_parent_is_retargeted_after_planning(self):
+        (self.home / ".claude").mkdir()
+        (self.home / ".agents").symlink_to(".claude")
+        changes = install_global.plan(self.source, self.home)
+        foreign = self.home / "foreign"
+        foreign.mkdir()
+        (self.home / ".agents").unlink()
+        (self.home / ".agents").symlink_to(foreign)
+
+        with self.assertRaises(install_global.InstallRefused) as refusal:
+            install_global.apply(changes)
+
+        self.assertEqual(
+            refusal.exception.conflicts,
+            [
+                (
+                    f"{self.home / '.agents/skills/local-agent'}:"
+                    " its folder changed after planning; rerun the install"
+                ),
+            ],
+        )
+        self.assertEqual(links_under(self.home), [self.home / ".agents"])
+        self.assertEqual(os.readlink(self.home / ".agents"), str(foreign))
+        self.assertEqual(os.listdir(foreign), [])
+
+    def test_refuses_and_rolls_back_when_an_alias_changes_during_writing(self):
+        (self.home / ".claude").mkdir()
+        (self.home / ".agents").symlink_to(".claude")
+        changes = install_global.plan(self.source, self.home)
+        foreign = self.home / "foreign"
+        foreign.mkdir()
+        original_symlink_to = Path.symlink_to
+
+        def retarget_alias(path, target, target_is_directory=False):
+            if path == self.home / ".codex/skills/local-agent":
+                (self.home / ".agents").unlink()
+                (self.home / ".agents").symlink_to(foreign)
+            return original_symlink_to(path, target, target_is_directory)
+
+        with (
+            mock.patch.object(Path, "symlink_to", retarget_alias),
+            self.assertRaises(install_global.InstallRefused) as refusal,
+        ):
+            install_global.apply(changes)
+
+        self.assertEqual(
+            refusal.exception.conflicts,
+            [
+                (
+                    f"{self.home / '.agents/skills/local-agent'}: does not reach {self.source}"
+                    " after writing; a folder changed during the install"
+                ),
+            ],
+        )
+        self.assertEqual(links_under(self.home), [self.home / ".agents"])
+        self.assertEqual(os.listdir(self.home / ".claude"), [])
+
+    def test_backup_cleanup_failure_after_commit_is_a_warning(self):
+        self.link(".claude/skills/local-agent", "/nonexistent/old")
+        changes = install_global.plan(self.source, self.home)
+        original_unlink = Path.unlink
+
+        def stuck_backup(path, *args, **kwargs):
+            if "install-backup" in path.name:
+                raise PermissionError(13, "simulated cleanup failure")
+            return original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", stuck_backup):
+            warnings = install_global.apply(changes)
+
+        [backup] = self.home.rglob("*install-backup*")
+        self.assertEqual(
+            warnings,
+            [
+                (
+                    f"{backup}: backup of a replaced link left behind"
+                    " ([Errno 13] simulated cleanup failure)"
+                ),
+            ],
+        )
+        for root in EXPECTED_SKILL_ROOTS:
+            self.assertEqual((self.home / root / "local-agent").resolve(), self.source)
+
+    @unittest.skipIf(install_global.fcntl is None, "no advisory locking on this platform")
+    def test_refuses_while_another_install_holds_the_lock(self):
+        with (
+            install_global.install_lock(self.home),
+            self.assertRaises(install_global.InstallRefused) as refusal,
+        ):
+            install_global.install(self.source, self.home)
+
+        self.assertEqual(
+            refusal.exception.conflicts,
+            [f"{self.home}: another install_global run holds the install lock"],
+        )
+        self.assertEqual(links_under(self.home), [])
+        self.assertEqual(sorted(p.name for p in self.home.iterdir()), ["agent-repo"])
+
+        install_global.install(self.source, self.home)
+        self.assertEqual(len(links_under(self.home)), len(EXPECTED_SKILL_ROOTS))
+
 
 class MainTests(unittest.TestCase):
     """main() in process, with the home directory and agent source pointed at a scratch tree."""
@@ -653,6 +934,59 @@ class MainTests(unittest.TestCase):
 
         self.assertEqual((code, stdout), (1, ""))
         self.assertIn("install failed: SKILL.md is missing", stderr)
+
+    def test_backup_cleanup_failure_still_exits_0_with_a_warning(self):
+        old = self.home / ".claude/skills/local-agent"
+        old.parent.mkdir(parents=True)
+        old.symlink_to("/nonexistent/old")
+        original_unlink = Path.unlink
+
+        def stuck_backup(path, *args, **kwargs):
+            if "install-backup" in path.name:
+                raise PermissionError(13, "simulated cleanup failure")
+            return original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", stuck_backup):
+            code, stdout, stderr = self.run_main()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(stdout.splitlines()), len(EXPECTED_SKILL_ROOTS))
+        [backup] = old.parent.glob("*install-backup*")
+        self.assertEqual(
+            stderr,
+            f"warning: {backup}: backup of a replaced link left behind"
+            " ([Errno 13] simulated cleanup failure); delete it by hand\n",
+        )
+
+    def test_incomplete_rollback_exits_1_and_lists_what_is_left(self):
+        destination = self.home / ".codex/skills/local-agent"
+        destination.parent.mkdir(parents=True)
+        destination.symlink_to("/nonexistent/old")
+
+        with fail_new_link_then_race_restore(destination):
+            code, stdout, stderr = self.run_main()
+
+        [backup] = destination.parent.glob("*install-backup*")
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertEqual(
+            stderr.splitlines(),
+            [
+                "install failed: [Errno 5] simulated failure",
+                "rollback could not undo everything:",
+                (
+                    f"  {destination}: now occupied by something else;"
+                    f" previous entry kept at {backup}"
+                ),
+            ],
+        )
+
+    @unittest.skipIf(install_global.fcntl is None, "no advisory locking on this platform")
+    def test_held_lock_exits_2(self):
+        with install_global.install_lock(self.home):
+            code, stdout, stderr = self.run_main()
+
+        self.assertEqual((code, stdout), (2, ""))
+        self.assertIn("another install_global run holds the install lock", stderr)
 
 
 class ScriptTests(HomeTestCase):

@@ -343,11 +343,12 @@ the first link is written: a real file or directory, a file where a folder is
 needed, an unwritable folder, or a link into another checkout refuses the whole
 install with exit status 2 and changes nothing. Links whose target was deleted
 are repointed and reported with their old target. Folders that are one physical
-folder, such as `~/.agents` symlinked to `~/.claude`, get a single link. If
-anything fails while writing, every link written by that run is undone.
-`--force` repoints links into
-another checkout, `--dry-run` prints the plan and touches nothing, and a second
-run changes nothing.
+folder, such as `~/.agents` symlinked to `~/.claude`, get a single link. A
+failure while writing removes the links that run created and restores the links
+it replaced; anything it cannot recover is listed with where the previous entry
+was kept, and the run exits 1. `--force` repoints links into another checkout,
+`--dry-run` prints the plan and touches nothing, and a second run changes
+nothing.
 
 Confirm that each selected tool can discover `local-agent` before continuing.
 The [custom-module installation guide](https://docs.bmad-method.org/how-to/install-custom-modules/)
