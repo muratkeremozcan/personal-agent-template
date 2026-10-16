@@ -767,6 +767,10 @@ class CredentialShapeTests(GateTestCase):
         '{"api_key": null, "password": "hunter22"}',
         "password: none, actually hunter22",
         "Password: rotated",
+        "Password: changed to Hunter2024!",
+        "PIN: reset to 4821",
+        "token: regenerated with abc123xyz",
+        "Password: rotated from hunter22 last week",
     )
 
     WHOLE_VALUE_CREDENTIALS = (

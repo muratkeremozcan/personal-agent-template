@@ -204,9 +204,10 @@ CREDENTIAL_STATUS_VERBS = (
     "reset", "rotated", "changed", "updated", "revoked", "expired", "removed", "stored",
     "saved", "kept", "moved", "issued", "regenerated",
 )  # fmt: skip
+# "to", "with" and "from" are left out: "changed to X", "reset with X" and "rotated from X"
+# carry a credential value.
 CREDENTIAL_STATUS_PREPOSITIONS = (
-    "by", "on", "in", "at", "via", "from", "to", "after", "before", "during", "with",
-    "for", "since", "until",
+    "by", "on", "in", "at", "via", "after", "before", "during", "for", "since", "until",
 )  # fmt: skip
 STATUS_SENTENCE = re.compile(
     r"(?:" + "|".join(CREDENTIAL_STATUS_VERBS) + r") +(?:"
