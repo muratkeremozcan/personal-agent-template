@@ -34,6 +34,10 @@ EXPECTED_SKILL_ROOTS = (
 )
 EXPECTED_AGENT_ROOTS = (".claude/agents",)
 
+MISSING_RENAME = (
+    f"libc has neither renamex_np nor renameat2; {install_global.RENAME_REQUIREMENT}"
+)
+
 
 def expected_target(directory: str, relative_source: str) -> str:
     """The relative symlink a discovery directory at this depth should carry."""
@@ -780,6 +784,95 @@ class ApplyTransactionTests(HomeTestCase):
             self.assertEqual(links_under(self.home), [])
 
 
+class AtomicRenameRequirementTests(HomeTestCase):
+    """Writing refuses up front without a kernel no-replace rename."""
+
+    def assert_nothing_written(self, old: Path) -> None:
+        self.assertEqual(links_under(self.home), [old])
+        self.assertEqual(os.readlink(old), "/nonexistent/old-checkout")
+        self.assertEqual(list(self.home.rglob(".install-*")), [])
+
+    def test_refuses_when_the_platform_has_no_exclusive_rename(self):
+        old = self.link(".claude/skills/local-agent", "/nonexistent/old-checkout")
+
+        with (
+            mock.patch.object(install_global.ctypes, "CDLL", return_value=object()),
+            self.assertRaises(install_global.InstallRefused) as refusal,
+        ):
+            install_global.install(self.source, self.home)
+
+        self.assertEqual(
+            refusal.exception.conflicts,
+            [f"{self.home}: {MISSING_RENAME}"],
+        )
+        self.assert_nothing_written(old)
+
+    def test_refuses_when_a_filesystem_rejects_the_no_replace_flag(self):
+        old = self.link(".claude/skills/local-agent", "/nonexistent/old-checkout")
+
+        def unsupported(source, destination):
+            raise OSError(errno.EINVAL, os.strerror(errno.EINVAL), str(destination))
+
+        with (
+            mock.patch.object(install_global, "_rename_exclusive", unsupported),
+            self.assertRaises(install_global.InstallRefused) as refusal,
+        ):
+            install_global.install(self.source, self.home)
+
+        self.assertEqual(
+            refusal.exception.conflicts,
+            [f"{self.home}: {os.strerror(errno.EINVAL)}; {install_global.RENAME_REQUIREMENT}"],
+        )
+        self.assert_nothing_written(old)
+
+    def test_no_path_deletes_a_file_written_at_a_replaced_link(self):
+        """Codex's interleaving: a writer replaces the public link at its unlink boundary."""
+        old = self.link(".claude/skills/local-agent", "/nonexistent/old-checkout")
+        original_unlink = Path.unlink
+        fired = []
+
+        def racing_unlink(path, *args, **kwargs):
+            if path == old and not fired:
+                fired.append(True)
+                original_unlink(path)
+                path.write_text("new real file from sync", encoding="utf-8")
+            return original_unlink(path, *args, **kwargs)
+
+        for native in (False, True):
+            with self.subTest(native=native):
+                patches = [mock.patch.object(Path, "unlink", racing_unlink)]
+                if not native:
+                    patches.append(
+                        mock.patch.object(install_global.ctypes, "CDLL", return_value=object())
+                    )
+                with contextlib.ExitStack() as stack:
+                    for patch in patches:
+                        stack.enter_context(patch)
+                    with contextlib.suppress(install_global.InstallRefused):
+                        install_global.install(self.source, self.home)
+                self.assertEqual(fired, [])
+
+        self.assertEqual(old.resolve(), self.source)
+
+    def test_force_repoints_every_kind_of_existing_link(self):
+        for kind in ("live-directory", "live-file", "dangling"):
+            with self.subTest(kind=kind):
+                old = self.home / f"old-{kind}"
+                if kind == "live-directory":
+                    old.mkdir()
+                elif kind == "live-file":
+                    old.write_text("old data", encoding="utf-8")
+                destination = self.home / ".claude/skills/local-agent"
+                destination.unlink(missing_ok=True)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.symlink_to(old)
+
+                changes = install_global.install(self.source, self.home, force=True)
+
+                self.assertEqual((changes[0].status, changes[0].previous), ("repointed", str(old)))
+                self.assertEqual(destination.resolve(), self.source)
+
+
 class RollbackInterleavingTests(HomeTestCase):
     """Another writer replaces this run's new link with a real file while rollback runs."""
 
@@ -1048,6 +1141,20 @@ class MainTests(unittest.TestCase):
 
         self.assertEqual((code, stdout), (2, ""))
         self.assertIn("another install_global run holds the install lock", stderr)
+
+    def test_missing_atomic_rename_exits_2_and_names_the_requirement(self):
+        with mock.patch.object(install_global.ctypes, "CDLL", return_value=object()):
+            code, stdout, stderr = self.run_main()
+
+        self.assertEqual((code, stdout), (2, ""))
+        self.assertEqual(
+            stderr.splitlines(),
+            [
+                "install refused; nothing was changed:",
+                f"  {self.home}: {MISSING_RENAME}",
+            ],
+        )
+        self.assertEqual(sorted(p.name for p in self.home.iterdir()), ["agent-repo"])
 
 
 class ScriptTests(HomeTestCase):

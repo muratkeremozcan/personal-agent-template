@@ -25,6 +25,10 @@ reported with its previous target. --dry-run prints the same report and touches 
 Discovery folders that share one physical folder, such as ~/.agents symlinked to
 ~/.claude, get one link, and every path that reaches it is reported.
 
+Writing needs an atomic no-replace rename: macOS renamex_np, or Linux renameat2 with
+RENAME_NOREPLACE on a filesystem that supports it. Each filesystem the run writes to is
+checked first, and one without it refuses the install with exit 2.
+
 Writing holds an advisory lock on the home directory, so two runs cannot interleave; a
 filesystem without flock runs unserialized and says so. Every removal, while installing
 or rolling back, first renames the entry to a unique quarantine name without replacing
@@ -85,12 +89,29 @@ RENAME_EXCL = 0x4
 RENAME_NOREPLACE = 0x1
 AT_FDCWD = -100
 
+# Errors meaning the platform or filesystem has no atomic no-replace rename.
+UNSUPPORTED_RENAME_ERRORS = {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
+RENAME_REQUIREMENT = (
+    "install_global needs an atomic no-replace rename: macOS renamex_np, or Linux"
+    " renameat2 with RENAME_NOREPLACE on a filesystem that supports it"
+)
+
 # flock failures that mean the filesystem cannot lock; anything else is a bug.
 UNSUPPORTED_LOCK_ERRORS = {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOLCK}
 
 # Undo steps, newest last: ("folder", path, None), ("linked", path, target), and
 # ("moved", path, quarantine path).
 Journal = list[tuple[str, Path, Path | str | None]]
+
+
+class Folder(NamedTuple):
+    """A destination's parent at planning time: where it resolves, and its nearest existing
+    folder with that folder's identity."""
+
+    resolved: Path
+    anchor: Path
+    device: int
+    inode: int
 
 
 class Change(NamedTuple):
@@ -102,7 +123,7 @@ class Change(NamedTuple):
     target: str
     previous: str | None = None
     alias_of: "Change | None" = None  # the change that writes this path's physical entry
-    parent: tuple | None = None  # the parent folder's identity at planning time
+    parent: Folder | None = None
 
 
 class InstallRefused(RuntimeError):
@@ -157,12 +178,10 @@ def _live_target(link: Path) -> Path | None:
 
 def _parent_conflicts(home: Path, destination: Path) -> list[str]:
     """Problems that would stop the destination's parent directories from being created."""
-    ancestors = [home]
-    for part in destination.parent.relative_to(home).parts:
-        ancestors.append(ancestors[-1] / part)
-
     nearest = home
-    for ancestor in ancestors:
+    for ancestor in reversed(destination.parents):
+        if not _is_within(ancestor, home):
+            continue
         if not os.path.lexists(ancestor):
             break
         if not ancestor.is_dir():
@@ -215,28 +234,23 @@ def _physical_key(destination: Path) -> tuple[int, int, tuple[str, ...]]:
     return status.st_dev, status.st_ino, tuple(tail)
 
 
-def _parent_identity(destination: Path) -> tuple[Path, Path, int, int]:
-    """Where a destination's parent resolves, and the inode of its nearest existing folder.
-
-    Creating a missing folder leaves this unchanged; retargeting a symlinked parent or
-    replacing the folder changes it.
-    """
-    parent = destination.parent.resolve()
-    anchor = parent
-    while not anchor.is_dir():
-        anchor = anchor.parent
+def _parent_identity(destination: Path) -> Folder:
+    """Creating a missing folder leaves this unchanged; retargeting a symlinked parent or
+    replacing the folder changes it."""
+    resolved = destination.parent.resolve()
+    anchor = next(folder for folder in (resolved, *resolved.parents) if folder.is_dir())
     status = anchor.stat()
-    return parent, anchor, status.st_dev, status.st_ino
+    return Folder(resolved, anchor, status.st_dev, status.st_ino)
 
 
 def _parent_unchanged(change: Change) -> bool:
-    parent, anchor, device, inode = change.parent
+    anchor = change.parent.anchor
     try:
         status = anchor.stat()
         resolved = change.destination.parent.resolve()
     except (OSError, RuntimeError):
         return False
-    return resolved == parent and (status.st_dev, status.st_ino) == (device, inode)
+    return Folder(resolved, anchor, status.st_dev, status.st_ino) == change.parent
 
 
 def plan(source: Path, home: Path, force: bool = False) -> list[Change]:
@@ -310,32 +324,52 @@ def _is_link_to(path: Path, target: str | None) -> bool:
 
 
 def _rename_exclusive(source: Path, destination: Path) -> None:
-    """Rename source to destination, raising FileExistsError when destination exists.
+    """Atomically rename source to destination, raising FileExistsError when it exists.
 
-    Uses the kernel's no-replace rename (renamex_np on macOS, renameat2 on Linux). A
-    platform without one falls back to a hard link for anything that is not a directory.
+    Calls the kernel's no-replace rename: renamex_np on macOS, renameat2 on Linux.
     """
-    old, new = os.fsencode(source), os.fsencode(destination)
     try:
         libc = ctypes.CDLL(None, use_errno=True)
     except OSError:
         libc = None
-
-    code = errno.ENOSYS
-    if libc is not None and hasattr(libc, "renamex_np"):
-        if libc.renamex_np(old, new, ctypes.c_uint(RENAME_EXCL)) == 0:
-            return
+    old, new = os.fsencode(source), os.fsencode(destination)
+    if hasattr(libc, "renamex_np"):
+        result = libc.renamex_np(old, new, ctypes.c_uint(RENAME_EXCL))
+    elif hasattr(libc, "renameat2"):
+        result = libc.renameat2(AT_FDCWD, old, AT_FDCWD, new, ctypes.c_uint(RENAME_NOREPLACE))
+    else:
+        raise OSError(errno.ENOSYS, "libc has neither renamex_np nor renameat2", str(destination))
+    if result != 0:
         code = ctypes.get_errno()
-    elif libc is not None and hasattr(libc, "renameat2"):
-        if libc.renameat2(AT_FDCWD, old, AT_FDCWD, new, ctypes.c_uint(RENAME_NOREPLACE)) == 0:
-            return
-        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(destination))
 
-    if code in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP) and not source.is_dir():
-        os.link(source, destination, follow_symlinks=False)
-        source.unlink()
-        return
-    raise OSError(code, os.strerror(code), str(destination))
+
+def _require_exclusive_rename(changes: list[Change]) -> None:
+    """Refuse unless each filesystem this run writes to has an atomic no-replace rename.
+
+    Renames a scratch file once per filesystem, before anything else is written.
+    """
+    folders = {
+        change.parent.device: change.parent.anchor
+        for change in changes
+        if change.status != "unchanged" and change.alias_of is None
+    }
+    unsupported = []
+    for folder in folders.values():
+        probe = folder / f".install-probe-{os.getpid()}-{secrets.token_hex(8)}"
+        renamed = probe.with_name(f"{probe.name}-renamed")
+        probe.touch(exist_ok=False)
+        try:
+            _rename_exclusive(probe, renamed)
+        except OSError as error:
+            if error.errno not in UNSUPPORTED_RENAME_ERRORS:
+                raise
+            unsupported.append(f"{folder}: {error.strerror}; {RENAME_REQUIREMENT}")
+        finally:
+            probe.unlink(missing_ok=True)
+            renamed.unlink(missing_ok=True)
+    if unsupported:
+        raise InstallRefused(unsupported)
 
 
 def _quarantine_name(path: Path) -> Path:
@@ -411,11 +445,7 @@ def _verify(changes: list[Change]) -> None:
 def _write(change: Change, journal: Journal) -> None:
     """Make one planned link, journaling each step before it happens."""
     destination = change.destination
-    missing = []
-    probe = destination.parent
-    while not os.path.lexists(probe):
-        missing.append(probe)
-        probe = probe.parent
+    missing = [parent for parent in destination.parents if not os.path.lexists(parent)]
     for folder in reversed(missing):
         with contextlib.suppress(FileExistsError):
             folder.mkdir()
@@ -453,6 +483,7 @@ def apply(changes: list[Change]) -> list[str]:
     ]
     if stale:
         raise InstallRefused(stale)
+    _require_exclusive_rename(changes)
 
     journal: Journal = []
     try:
