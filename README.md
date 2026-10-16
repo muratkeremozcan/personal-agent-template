@@ -74,6 +74,9 @@ The agent can take any display name; `local-agent` stays the internal name the s
 
 ## Before You Start
 
+The template supports macOS and Linux.
+Windows is unsupported: the installer needs permission to create symlinks, and `wake.py` prints commands with POSIX shell quoting.
+
 Install:
 
 - Node.js 20.12 or newer
@@ -111,10 +114,12 @@ git remote set-url origin <private-repository-url>
 git push -u origin main
 ```
 
-If you use another location, set `LOCAL_AGENT_HOME` to its absolute path before running the agent:
+If you use another location, set `LOCAL_AGENT_HOME` to its absolute path before running the agent.
+The scripts stop with `HOME_MISCONFIGURED` when that directory does not exist, so create it right after the export:
 
 ```bash
 export LOCAL_AGENT_HOME=/absolute/path/to/local-agent
+mkdir -p "$LOCAL_AGENT_HOME"
 ```
 
 ### 2. Install BMad Builder
@@ -151,8 +156,11 @@ skills/local-agent/SKILL.md
 ### 4. Run the Lifecycle Tests
 
 ```bash
-python3 -m unittest discover -s skills/local-agent/scripts/tests
+uv run --no-project --python 3.10 python -m unittest discover -s skills/local-agent/scripts/tests
 ```
+
+Python 3.10 is the oldest version the scripts support, and `uv` downloads it when it is missing.
+Stock macOS `python3` is 3.9, which fails the suite.
 
 ### 5. Install the Generated Skill
 

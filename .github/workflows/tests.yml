@@ -2,7 +2,7 @@ name: tests
 
 # The scripts here decide what leaves an agent's private memory for a durable, often
 # synced store. A regression in that gate is not visible by reading a diff, so the suite
-# runs on every push and every pull request rather than on a schedule.
+# runs on every push and every pull request.
 on:
   push:
     branches: [main]
@@ -18,36 +18,144 @@ concurrency:
 
 jobs:
   unittest:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        # The floor is what `requires-python` in the scripts declares. The ceiling
-        # catches a deprecation before it reaches anyone building on the template.
-        python-version: ["3.10", "3.13"]
+        # The owner runs macOS, and the scripts resolve symlinks, HOME, /private/tmp and
+        # case-insensitive paths, all of which behave differently there.
+        os: [ubuntu-latest, macos-latest]
+        # The floor is what `requires-python` in the scripts declares. The ceiling is the
+        # newest stable CPython, so a deprecation surfaces before it reaches anyone
+        # building on the template.
+        python-version: ["3.10", "3.15"]
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
         with:
-          python-version: ${{ matrix.python-version }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          # No lockfile or pyproject exists to key a cache on, and a cold start is what
+          # a new user gets.
+          enable-cache: false
 
       - name: Run the suite
-        # Standard library only, so there is nothing to install. If that ever stops
-        # being true this step fails loudly rather than silently skipping.
-        run: python -m unittest discover -s skills/local-agent/scripts/tests -v
+        # The same command the README documents. Standard library only, so there is
+        # nothing to install.
+        run: >-
+          uv run --no-project --python ${{ matrix.python-version }}
+          python -m unittest discover -s skills/local-agent/scripts/tests -v
 
-      - name: Check the scripts are syntactically valid on this version
-        run: python -m compileall -q skills/local-agent/scripts
+  smoke:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.15"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: false
+
+      - name: Run the lifecycle through uv, the way a user does
+        # The unit tests import the scripts and never read their inline `# /// script`
+        # metadata. This step does: uv resolves each script's dependencies and
+        # requires-python exactly as it does on a user's machine, so a bad dependency
+        # entry or a raised floor fails here.
+        env:
+          HOME: ${{ runner.temp }}/home
+          LOCAL_AGENT_HOME: ${{ runner.temp }}/home/local-agent
+          PROJECT: ${{ runner.temp }}/project
+          UV_PYTHON: ${{ matrix.python-version }}
+        run: |
+          set -euo pipefail
+          scripts=skills/local-agent/scripts
+          # An explicit LOCAL_AGENT_HOME names a directory the owner already made.
+          mkdir -p "$HOME" "$LOCAL_AGENT_HOME" "$PROJECT"
+
+          # uv only warns when the pinned interpreter falls outside a script's
+          # requires-python, so the warning is promoted to a failure here.
+          uvrun() {
+            local err="$RUNNER_TEMP/uv-stderr"
+            local status=0
+            uv run "$@" 2>"$err" || status=$?
+            cat "$err" >&2
+            if grep -q "incompatible with the script's Python requirement" "$err"; then
+              echo "::error::$1 declares a requires-python that excludes Python $UV_PYTHON"
+              return 1
+            fi
+            return "$status"
+          }
+
+          uvrun "$scripts/init-sanctum.py" "$PROJECT" skills/local-agent
+          sanctum="$LOCAL_AGENT_HOME/_bmad/memory/local-agent"
+          test -f "$sanctum/MEMORY.md"
+
+          # First Breath seals the sanctum by writing today's date to `.born`.
+          date +%F > "$sanctum/.born"
+
+          uvrun "$scripts/wake.py" "$PROJECT" | tee "$RUNNER_TEMP/wake.txt"
+          grep -qx "MODE: WAKING" "$RUNNER_TEMP/wake.txt"
+
+          uvrun "$scripts/curate.py" "$PROJECT" | tee "$RUNNER_TEMP/curate.json"
+          jq -e '.tokenizer.method == "tiktoken"' "$RUNNER_TEMP/curate.json"
+
+          uvrun "$scripts/verify_archive_redaction.py" --help
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: false
 
       - name: Lint
-        # Rule families are pinned in ruff.toml, so a ruff release changes nothing here
-        # until someone edits that file.
+        # uvx resolves the newest ruff on every run, and each rule family selected in
+        # ruff.toml picks up new stable rules as ruff ships them. Lint floats on purpose:
+        # a ruff release can fail this job, and the fix is to address the new finding.
         run: uvx ruff check .
+
+  links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check relative links and anchors in the docs
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --offline --include-fragments --no-progress
+            README.md docs skills
+
+  # The one check branch protection requires. Matrix check names carry the Python
+  # version, so requiring them directly would break each time the ceiling moves. This job
+  # runs whatever the others did and passes only when every one of them succeeded, so a
+  # failed, skipped or cancelled leg fails it.
+  ci:
+    if: always()
+    needs: [unittest, smoke, lint, links]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require every job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          jq -e 'all(.[]; .result == "success")' <<<"$NEEDS" >/dev/null

@@ -1,0 +1,16 @@
+# The workflows reference each action by its latest major tag; setup-uv publishes no major
+# tags, so it is referenced by its latest release. Dependabot moves every reference forward
+# weekly in one grouped pull request, so they stay current without hand maintenance.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # A release has a week in the open before it is proposed here, which is when a
+    # compromised one usually gets caught and pulled.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
